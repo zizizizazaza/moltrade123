@@ -1,69 +1,105 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Position } from '../types';
+import { getStrategyDetail, getStrategyPerformance, StrategyDetailResponse, StrategyPerformanceResponse } from '../api';
 
-const data1w = [
-  { name: 'Mon', pnl: 2000 },
-  { name: 'Tue', pnl: 4500 },
-  { name: 'Wed', pnl: 3800 },
-  { name: 'Thu', pnl: 6500 },
-  { name: 'Fri', pnl: 5900 },
-  { name: 'Sat', pnl: 8200 },
-  { name: 'Sun', pnl: 11000 },
-];
-
-const data1m = Array.from({ length: 30 }, (_, i) => ({
-  name: `${i + 1}`,
-  pnl: 5000 + Math.sin(i / 2) * 2000 + i * 100
-}));
-
-const dataAll = [
-  { name: 'Jan', pnl: 12000 },
-  { name: 'Feb', pnl: 15400 },
-  { name: 'Mar', pnl: 18900 },
-  { name: 'Apr', pnl: 22000 },
-  { name: 'May', pnl: 21500 },
-  { name: 'Jun', pnl: 24800 },
-  { name: 'Jul', pnl: 29000 },
-  { name: 'Aug', pnl: 34000 },
-  { name: 'Sep', pnl: 32000 },
-  { name: 'Oct', pnl: 38000 },
-  { name: 'Nov', pnl: 42000 },
-  { name: 'Dec', pnl: 48000 },
-];
-
-const mockPositions: Position[] = [
-  { asset: 'BTC/USDT', type: 'Long', entryPrice: 61240.50, currentPrice: 63420.25, pnl: 1420.50, pnlPercent: 3.56, leverage: '10x', icon: '₿' },
-];
-
-const mockActivity = [
-  { id: 1, type: 'Buy', asset: 'BTC/USDT', amount: '0.421', price: 61420.50, time: '02 Min Ago', status: 'Completed' },
-  { id: 2, type: 'Sell', asset: 'ETH/USDT', amount: '12.50', price: 2540.10, time: '15 Min Ago', status: 'Completed' },
-  { id: 3, type: 'Buy', asset: 'SOL/USDT', amount: '150.00', price: 142.80, time: '12H Ago', status: 'Completed' },
-  { id: 4, type: 'Sell', asset: 'LINK/USDT', amount: '840.00', price: 18.25, time: '1D Ago', status: 'Completed' },
-  { id: 5, type: 'Buy', asset: 'BTC/USDT', amount: '0.150', price: 59800.00, time: '2D Ago', status: 'Completed' },
-];
-
-const mockStrategyDetails: Record<string, any> = {
-  'snx': { name: 'Sigma Arbitrage X', type: 'Arbitrage', status: 'Active', pairs: ['BTC', 'USDC'], profitShare: '10%' },
-  'ccln': { name: 'Cross-Chain Liquidity Node', type: 'Grid', status: 'Active', pairs: ['ETH', 'USDC'], profitShare: '20%' },
-  'hfmr': { name: 'High-Freq Mean Reversion', type: 'Signal-based', status: 'Active', pairs: ['SOL', 'USDC'], profitShare: '15%' },
-  'vwtf': { name: 'Vol-Weighted Trend Follower', type: 'Momentum', status: 'Idle', pairs: ['BTC', 'SOL'], profitShare: '10%' },
-  'msv4': { name: 'Momentum Sentinel v4', type: 'Momentum', status: 'Active', pairs: ['ETH', 'BTC'], profitShare: '25%' },
-  'lh': { name: 'Liquidation Hunter', type: 'Signal-based', status: 'Active', pairs: ['SOL', 'ETH'], profitShare: '20%' },
-  'dna4': { name: 'Neural Alpha-IV', type: 'Signal-based', status: 'Active', pairs: ['ETH', 'USDC'], profitShare: '15%' },
-  'dca_m1': { name: 'DCA Master', type: 'DCA', status: 'Active', pairs: ['BTC', 'ETH'], profitShare: '5%' },
-};
+const REFRESH_INTERVAL_MS = 10000;
 
 const StrategyDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
-  const strategy = mockStrategyDetails[id || 'dna4'] || mockStrategyDetails['dna4'];
-
   const [activeTab, setActiveTab] = useState<'positions' | 'activity'>('positions');
   const [viewMode, setViewMode] = useState<'rate' | 'amount'>('rate');
   const [timeRange, setTimeRange] = useState<'1w' | '1m' | 'all'>('1m');
+  const [detail, setDetail] = useState<StrategyDetailResponse | null>(null);
+  const [performance, setPerformance] = useState<StrategyPerformanceResponse | null>(null);
+  const [isPerformanceLoading, setIsPerformanceLoading] = useState<boolean>(true);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+
+    const load = async (showLoading: boolean) => {
+      if (showLoading) {
+        setIsLoading(true);
+        setError(null);
+      }
+      try {
+        const res = await getStrategyDetail(id, { period: '30d', activity_limit: 20 });
+        if (!cancelled) setDetail(res);
+      } catch (err) {
+        if (!cancelled && showLoading) setError(err instanceof Error ? err.message : 'Failed to load strategy detail');
+      } finally {
+        if (!cancelled && showLoading) setIsLoading(false);
+      }
+    };
+
+    load(true);
+    const timer = setInterval(() => {
+      load(false);
+    }, REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    const metric = viewMode === 'rate' ? 'roi' : 'pnl';
+
+    const loadPerformance = async (showLoading: boolean) => {
+      if (showLoading) setIsPerformanceLoading(true);
+      try {
+        const res = await getStrategyPerformance(id, {
+          period: timeRange,
+          metric,
+          interval: '1d',
+        });
+        if (!cancelled) setPerformance(res);
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to load strategy performance:', err);
+          if (showLoading) setPerformance(null);
+        }
+      } finally {
+        if (!cancelled && showLoading) setIsPerformanceLoading(false);
+      }
+    };
+
+    loadPerformance(true);
+    const timer = setInterval(() => {
+      loadPerformance(false);
+    }, REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [id, timeRange, viewMode]);
+
+  const formatCategoryLabel = (value: string) => {
+    const normalized = value.toLowerCase();
+    if (normalized === 'signal-based') return 'Signal-based';
+    if (normalized === 'dca') return 'DCA';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  };
+
+  const strategyName = detail?.overview.strategy ? formatCategoryLabel(detail.overview.strategy) : (id || 'Strategy');
+  const strategyType = detail?.overview.category ? formatCategoryLabel(detail.overview.category) : 'Signal-based';
+  const strategyPairs = useMemo(() => {
+    const fromPositions = (detail?.current_positions || [])
+      .map((pos) => pos.asset.split('/').map((x) => x.toUpperCase()))
+      .flat()
+      .filter(Boolean);
+    const unique = Array.from(new Set(fromPositions));
+    return unique.length > 0 ? unique.slice(0, 2) : ['BTC', 'USDT'];
+  }, [detail]);
+  const profitShareText = `${(detail?.overview.profit_share ?? 0).toFixed(1)}%`;
 
   const getTypeSpecificParams = (type: string) => {
     switch (type) {
@@ -132,42 +168,103 @@ const StrategyDetail: React.FC = () => {
     return (
       <div className="flex -space-x-1.5 items-center">
         {pairs.map((symbol, idx) => (
-          <TokenIcon key={idx} symbol={symbol} />
+          <div key={`${symbol}-${idx}`}>
+            <TokenIcon symbol={symbol} />
+          </div>
         ))}
       </div>
     );
   };
 
-  const getRawData = () => {
-    if (timeRange === '1w') return data1w;
-    if (timeRange === '1m') return data1m;
-    return dataAll;
-  };
+  const chartData = useMemo(() => {
+    const points = performance?.points || [];
+    const buildFallbackPoints = () => {
+      const count = timeRange === '1w' ? 7 : timeRange === '1m' ? 30 : 12;
+      const now = new Date();
+      return Array.from({ length: count }, (_, idx) => {
+        const d = new Date(now);
+        if (timeRange === 'all') {
+          d.setMonth(now.getMonth() - (count - 1 - idx));
+        } else {
+          d.setDate(now.getDate() - (count - 1 - idx));
+        }
+        return { ts: d.toISOString(), value: 0 };
+      });
+    };
+    const normalizedPoints = points.length > 0 ? points : buildFallbackPoints();
+    return normalizedPoints.map((point) => {
+      const date = new Date(point.ts);
+      const label =
+        timeRange === 'all'
+          ? date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+          : timeRange === '1m'
+            ? date.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })
+            : date.toLocaleDateString(undefined, { weekday: 'short' });
+      return {
+        name: label,
+        ts: point.ts,
+        displayPnl: point.value,
+      };
+    });
+  }, [performance, timeRange]);
 
-  const chartData = getRawData().map(d => ({
-    ...d,
-    displayPnl: viewMode === 'rate' ? (d.pnl / 100) : (d.pnl * 10)
-  }));
+  const yAxisDomain = useMemo<[number, number]>(() => {
+    if (chartData.length === 0) return [-1, 1];
+    const values = chartData.map((d) => d.displayPnl);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    if (min === max) {
+      const padding = Math.abs(min) < 1 ? 1 : Math.abs(min) * 0.1;
+      return [min - padding, max + padding];
+    }
+    return [min, max];
+  }, [chartData]);
+
+  if (isLoading) {
+    return (
+      <div className="pt-24 pb-20 px-6 max-w-7xl mx-auto">
+        <div className="w-full py-16 flex items-center justify-center">
+          <div className="flex items-center gap-3 text-white/60 text-sm font-semibold">
+            <span className="inline-block w-4 h-4 border-2 border-white/20 border-t-primary-accent rounded-full animate-spin"></span>
+            Loading strategy detail...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !detail) {
+    return (
+      <div className="pt-24 pb-20 px-6 max-w-7xl mx-auto">
+        <div className="bg-section-bg border border-white/10 rounded-2xl p-8 text-center">
+          <p className="text-white/70 text-sm">{error || 'Strategy detail not found'}</p>
+          <Link to="/strategy" className="inline-block mt-4 text-primary-accent hover:underline text-sm">
+            Back to strategies
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="pt-24 pb-20 px-6 max-w-7xl mx-auto">
       <div className="flex items-center gap-2 text-white/40 text-[11px] font-semibold tracking-wide mb-8">
         <Link to="/strategy" className="hover:text-white transition-colors">Strategies</Link>
         <span>/</span>
-        <span className="text-white">{strategy.name} Detail</span>
+        <span className="text-white">{strategyName} Detail</span>
       </div>
 
       <header className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12 border-b border-white/5 pb-10">
         <div className="flex items-center gap-8">
           <div>
             <div className="flex items-center gap-4 mb-2">
-              <h1 className="text-4xl font-black tracking-tight">{strategy.name}</h1>
-              <div className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-[11px] font-bold text-white/60 uppercase tracking-widest">{strategy.type}</div>
+              <h1 className="text-4xl font-black tracking-tight">{strategyName}</h1>
+              <div className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-[11px] font-bold text-white/60 uppercase tracking-widest">{strategyType}</div>
             </div>
             <div className="flex items-center gap-4">
-              <span className="text-sm text-white/40 font-mono">By <Link to="/agent/alpha" className="text-white/80 hover:text-primary-accent transition-colors">@Agent_Alpha</Link></span>
+              <span className="text-sm text-white/40 font-mono">By <span className="text-white/80">@system</span></span>
               <span className="text-white/10">•</span>
-              <span className="text-[11px] text-white/40 font-bold tracking-[0.2em]">v2.4.0-STABLE</span>
+              <span className="text-[11px] text-white/40 font-bold tracking-[0.2em]">RUNTIME {detail.overview.runtime_days ?? 0}D</span>
             </div>
           </div>
         </div>
@@ -175,22 +272,40 @@ const StrategyDetail: React.FC = () => {
           <div className="text-right">
             <div className="text-[10px] text-white/30 font-bold tracking-[0.2em] mb-3 uppercase">Trading Pairs</div>
             <div className="flex justify-end">
-              <TokenPairIcons pairs={strategy.pairs} />
+              <TokenPairIcons pairs={strategyPairs} />
             </div>
           </div>
           <div className="h-12 w-px bg-white/5"></div>
           <div className="text-right">
             <div className="text-[10px] text-white/30 font-bold tracking-[0.2em] mb-2 uppercase">Profit Share</div>
-            <div className="text-xl font-black font-mono text-white">{strategy.profitShare}</div>
+            <div className="text-xl font-black font-mono text-white">{profitShareText}</div>
           </div>
         </div>
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
         {[
-          { label: 'Total ROI (%)', value: '+142.85%', sub: 'Since Genesis', color: 'text-[#10B981]', icon: 'trending_up' },
-          { label: 'Total Profit ($)', value: '+$420,150', sub: 'Realized + Unr.', color: 'text-[#10B981]', icon: 'payments' },
-          { label: 'Total Assets', value: '1.28M USDT', sub: 'AUM Value', color: 'text-white', icon: 'account_balance_wallet' },
+          {
+            label: 'Total ROI (%)',
+            value: `${(detail.overview.total_roi ?? 0) >= 0 ? '+' : ''}${(detail.overview.total_roi ?? 0).toFixed(2)}%`,
+            sub: 'Since Genesis',
+            color: (detail.overview.total_roi ?? 0) >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]',
+            icon: 'trending_up',
+          },
+          {
+            label: 'Total Profit ($)',
+            value: `${(detail.overview.total_profit ?? 0) >= 0 ? '+$' : '-$'}${Math.abs(detail.overview.total_profit ?? 0).toLocaleString()}`,
+            sub: 'Realized + Unr.',
+            color: (detail.overview.total_profit ?? 0) >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]',
+            icon: 'payments',
+          },
+          {
+            label: 'Total Assets',
+            value: `$${(detail.overview.total_assets ?? 0).toLocaleString()}`,
+            sub: 'AUM Value',
+            color: 'text-white',
+            icon: 'account_balance_wallet',
+          },
         ].map((stat, i) => (
           <div key={i} className="bg-section-bg p-6 rounded-2xl border border-white/5 shadow-sm">
             <div className="text-[11px] font-bold text-white/40 tracking-wider mb-4 flex items-center gap-2 uppercase">
@@ -245,36 +360,43 @@ const StrategyDetail: React.FC = () => {
             </div>
 
             <div className="h-[400px] w-full relative">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData}>
-                  <defs>
-                    <linearGradient id="colorPnl" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#FF3E1D" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#FF3E1D" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                  <XAxis
-                    dataKey="name"
-                    stroke="rgba(255,255,255,0.2)"
-                    fontSize={11}
-                    tickLine={false}
-                    axisLine={false}
-                    dy={10}
-                    interval={timeRange === '1m' ? 4 : 0}
-                  />
-                  <YAxis hide />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#1A1A1E', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px' }}
-                    itemStyle={{ color: '#FF3E1D', fontWeight: 'bold' }}
-                    formatter={(value: number) => [
-                      viewMode === 'rate' ? `${value.toFixed(2)}%` : `$${value.toLocaleString()}`,
-                      viewMode === 'rate' ? 'Profit Rate' : 'Profit Amount'
-                    ]}
-                  />
-                  <Area type="monotone" dataKey="displayPnl" stroke="#FF3E1D" strokeWidth={3} fillOpacity={1} fill="url(#colorPnl)" />
-                </AreaChart>
-              </ResponsiveContainer>
+              {isPerformanceLoading ? (
+                <div className="h-full flex items-center justify-center text-white/60 text-sm font-semibold">
+                  <span className="inline-block w-4 h-4 border-2 border-white/20 border-t-primary-accent rounded-full animate-spin mr-3"></span>
+                  Loading performance...
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={chartData}>
+                    <defs>
+                      <linearGradient id="colorPnl" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#FF3E1D" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#FF3E1D" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+                    <XAxis
+                      dataKey="name"
+                      stroke="rgba(255,255,255,0.2)"
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                      dy={10}
+                      interval={timeRange === '1m' ? 4 : 0}
+                    />
+                    <YAxis hide domain={yAxisDomain} />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#1A1A1E', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px' }}
+                      itemStyle={{ color: '#FF3E1D', fontWeight: 'bold' }}
+                      formatter={(value: number) => [
+                        viewMode === 'rate' ? `${value.toFixed(2)}%` : `$${value.toLocaleString()}`,
+                        viewMode === 'rate' ? 'Profit Rate' : 'Profit Amount'
+                      ]}
+                    />
+                    <Area type="monotone" dataKey="displayPnl" stroke="#FF3E1D" strokeWidth={3} fillOpacity={1} fill="url(#colorPnl)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </div>
 
@@ -309,33 +431,48 @@ const StrategyDetail: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
-                      {mockPositions.map((pos, i) => (
+                      {detail.current_positions.map((pos, i) => {
+                        const pnlPctRaw = pos.entry_price ? ((pos.current_price - pos.entry_price) / pos.entry_price) * 100 : 0;
+                        const pnlPct = pos.side.toLowerCase() === 'short' ? -pnlPctRaw : pnlPctRaw;
+                        const pnlColor = pos.unrealized_pnl >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]';
+                        const side = pos.side.toLowerCase();
+                        const sideClass =
+                          side === 'long'
+                            ? 'bg-green-500/10 text-green-500'
+                            : side === 'short'
+                              ? 'bg-red-500/10 text-red-500'
+                              : 'bg-white/10 text-white/60';
+                        return (
                         <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
                           <td className="px-8 py-6">
                             <div className="flex items-center gap-4">
                               <div className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold shadow-lg ${pos.asset.includes('BTC') ? 'bg-[#F7931A]' : 'bg-[#627EEA]'}`}>
-                                {pos.icon}
+                                {pos.asset.split('/')[0]}
                               </div>
                               <div>
                                 <div className="text-sm font-bold text-white">{pos.asset}</div>
-                                <div className="text-[10px] text-white/30 font-mono mt-0.5">Isolated {pos.leverage}</div>
+                                <div className="text-[10px] text-white/30 font-mono mt-0.5">Amount {pos.amount}</div>
                               </div>
                             </div>
                           </td>
                           <td className="px-8 py-6">
-                            <span className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${pos.type === 'Long' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'
-                              }`}>
-                              {pos.type}
+                            <span className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${sideClass}`}>
+                              {pos.side}
                             </span>
                           </td>
-                          <td className="px-8 py-6 text-right text-xs font-mono text-white/60">${pos.entryPrice.toLocaleString()}</td>
-                          <td className="px-8 py-6 text-right text-xs font-mono text-white/90">${pos.currentPrice.toLocaleString()}</td>
+                          <td className="px-8 py-6 text-right text-xs font-mono text-white/60">${pos.entry_price.toLocaleString()}</td>
+                          <td className="px-8 py-6 text-right text-xs font-mono text-white/90">${pos.current_price.toLocaleString()}</td>
                           <td className="px-8 py-6 text-right">
-                            <div className="text-sm font-bold text-[#10B981] font-mono">+${pos.pnl.toLocaleString()}</div>
-                            <div className="text-[10px] text-[#10B981]/60 font-mono mt-0.5">+{pos.pnlPercent}%</div>
+                            <div className={`text-sm font-bold font-mono ${pnlColor}`}>
+                              {pos.unrealized_pnl >= 0 ? '+$' : '-$'}{Math.abs(pos.unrealized_pnl).toLocaleString()}
+                            </div>
+                            <div className={`text-[10px] font-mono mt-0.5 ${pnlColor}`}>
+                              {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                            </div>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </>
                 ) : (
@@ -351,22 +488,31 @@ const StrategyDetail: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
-                      {mockActivity.map((act) => (
-                        <tr key={act.id} className="hover:bg-white/[0.02] transition-colors group">
-                          <td className="px-8 py-6 text-xs font-mono text-white/30">{act.time}</td>
-                          <td className="px-8 py-6">
-                            <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider border ${act.type === 'Buy' ? 'bg-green-500/10 text-green-500 border-green-500/20' : 'bg-red-500/10 text-red-500 border-red-500/20'}`}>
-                              {act.type}
-                            </span>
-                          </td>
-                          <td className="px-8 py-6 text-sm font-bold text-white/80">{act.asset}</td>
-                          <td className="px-8 py-6 text-right text-xs font-mono text-white/90">{act.amount}</td>
-                          <td className="px-8 py-6 text-right text-xs font-mono text-white/60">${act.price.toLocaleString()}</td>
-                          <td className="px-8 py-6 text-right">
-                            <span className="text-[10px] font-bold text-[#10B981] uppercase tracking-tighter">● {act.status}</span>
-                          </td>
-                        </tr>
-                      ))}
+                      {detail.activity_logs.map((act) => {
+                        const action = act.action.toLowerCase();
+                        const actionClass =
+                          action === 'long' || action === 'buy'
+                            ? 'bg-green-500/10 text-green-500 border-green-500/20'
+                            : action === 'short' || action === 'sell'
+                              ? 'bg-red-500/10 text-red-500 border-red-500/20'
+                              : 'bg-white/10 text-white/60 border-white/20';
+                        return (
+                          <tr key={act.id} className="hover:bg-white/[0.02] transition-colors group">
+                            <td className="px-8 py-6 text-xs font-mono text-white/30">{new Date(act.created_at).toLocaleString()}</td>
+                            <td className="px-8 py-6">
+                              <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider border ${actionClass}`}>
+                                {act.action}
+                              </span>
+                            </td>
+                            <td className="px-8 py-6 text-sm font-bold text-white/80">{act.asset}</td>
+                            <td className="px-8 py-6 text-right text-xs font-mono text-white/90">{act.amount.toLocaleString()}</td>
+                            <td className="px-8 py-6 text-right text-xs font-mono text-white/60">${act.price.toLocaleString()}</td>
+                            <td className="px-8 py-6 text-right">
+                              <span className="text-[10px] font-bold text-[#10B981] uppercase tracking-tighter">● {act.status}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </>
                 )}
@@ -396,12 +542,12 @@ const StrategyDetail: React.FC = () => {
                 </h4>
                 <div className="grid grid-cols-1 gap-4">
                   {[
-                    ...getTypeSpecificParams(strategy.type),
-                    { label: 'Profit Share', value: strategy.profitShare },
-                    { label: 'Latest Price', value: '$63,420.25' },
-                    { label: 'Runtime', value: '142D 08H' },
-                    { label: 'Position Side', value: <span className="text-primary-accent font-bold">Long/Short</span> },
-                    { label: 'Initial Margin', value: '250,000 USDT' },
+                    ...getTypeSpecificParams(strategyType),
+                    { label: 'Profit Share', value: profitShareText },
+                    { label: 'Latest Price', value: `$${(detail.overview.latest_price ?? 0).toLocaleString()}` },
+                    { label: 'Runtime', value: `${detail.overview.runtime_days ?? 0}D` },
+                    { label: 'Trading Frequency', value: detail.overview.trading_frequency || 'N/A' },
+                    { label: 'Win Rate', value: `${(detail.overview.win_rate ?? 0).toFixed(1)}%` },
                   ].map((param, i) => (
                     <div key={i} className="bg-main-bg/50 border border-white/5 rounded-2xl p-5 flex justify-between items-center group hover:border-white/10 transition-all shadow-sm">
                       <span className="text-[10px] text-white/30 tracking-[0.15em] font-bold uppercase">{param.label}</span>
@@ -416,7 +562,7 @@ const StrategyDetail: React.FC = () => {
                   <span className="w-2 h-2 bg-primary-accent rounded-full shadow-[0_0_8px_rgba(255,62,29,0.5)]"></span> Logic Architecture
                 </h4>
                 <p className="text-[15px] leading-relaxed text-white/70 font-medium">
-                  DeltaNeutral-9 utilizes a multi-layer neural network to identify market inefficiencies across major DEX/CEX pairs. It maintains a strictly neutral exposure through dynamic hedging, optimizing for risk-adjusted returns regardless of market direction.
+                  Strategy detail now comes from backend live data. This section can be upgraded later to render strategy-specific narrative from server-side metadata.
                 </p>
               </section>
             </div>
@@ -424,7 +570,7 @@ const StrategyDetail: React.FC = () => {
             <div className="mt-12 pt-8 border-t border-white/5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] text-white/30 font-bold tracking-[0.15em] uppercase">Strategy ID</span>
-                <span className="text-[11px] font-mono text-white/60 tracking-wider">DN9-Alpha-827-02</span>
+                <span className="text-[11px] font-mono text-white/60 tracking-wider">{id}</span>
               </div>
             </div>
           </div>

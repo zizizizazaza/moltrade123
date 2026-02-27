@@ -1,34 +1,43 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { Strategy, Trade } from '../types';
+import { getTrendingStrategies, TrendingCategory } from '../api';
 
-const mockStrategies: Strategy[] = [
-  { id: 'snx', name: 'Sigma Arbitrage X', author: '@agent_alpha', version: 'v2.4.0', status: 'Active', roi: 12.4, profit: 14200, followers: '1,240', tradingDays: 142, icon: '🦾', pairs: ['BTC', 'USDC'], profitShare: '10%', type: 'Arbitrage', maxDrawdown: 4.2 },
-  { id: 'ccln', name: 'Cross-Chain Liquidity Node', author: '@neuro_trader', version: 'v1.1.2', status: 'Active', roi: 34.8, profit: 42900, followers: '842', tradingDays: 84, icon: 'FOX', pairs: ['ETH', 'USDC'], profitShare: '20%', type: 'Grid', maxDrawdown: 12.5 },
-  { id: 'hfmr', name: 'High-Freq Mean Reversion', author: '@grid_master', version: 'v0.9.5', status: 'Active', roi: 18.2, profit: 8450, followers: '2.1k', tradingDays: 312, icon: '🧬', pairs: ['SOL', 'USDC'], profitShare: '15%', type: 'Signal-based', maxDrawdown: 8.4 },
-  { id: 'vwtf', name: 'Vol-Weighted Trend Follower', author: '@deep_agent', version: 'v3.0.1', status: 'Idle', roi: -1.2, profit: -2100, followers: '5.2k', tradingDays: 520, icon: '🐋', pairs: ['BTC', 'SOL'], profitShare: '10%', type: 'Momentum', maxDrawdown: 15.2 },
-  { id: 'msv4', name: 'Momentum Sentinel v4', author: '@speed_demon', version: 'v4.1.0', status: 'Active', roi: 45.2, profit: 128400, followers: '12.4k', tradingDays: 842, icon: '⚡', pairs: ['ETH', 'BTC'], profitShare: '25%', type: 'Momentum', maxDrawdown: 18.2 },
-  { id: 'lh', name: 'Liquidation Hunter', author: '@dark_pool', version: 'v0.2.1', status: 'Active', roi: 124.5, profit: 342000, followers: '3.1k', tradingDays: 45, icon: '🎯', pairs: ['SOL', 'ETH'], profitShare: '20%', type: 'Signal-based', maxDrawdown: 22.4 },
-  { id: 'dna4', name: 'Neural Alpha-IV', author: '@gpt_trader', version: 'v1.0.0', status: 'Active', roi: 89.2, profit: 56400, followers: '4.8k', tradingDays: 156, icon: '🧠', pairs: ['ETH', 'USDC'], profitShare: '15%', type: 'Signal-based', maxDrawdown: 9.8 },
-  { id: 'dca_m1', name: 'DCA Master', author: '@stacker', version: 'v2.1.0', status: 'Active', roi: 15.6, profit: 12300, followers: '1.5k', tradingDays: 420, icon: '🧱', pairs: ['BTC', 'ETH'], profitShare: '5%', type: 'DCA', maxDrawdown: 5.4 },
+const TARGET_ASSETS = ['BTC', 'ETH', 'SOL', 'DOGE'] as const;
+const BINANCE_STREAM_SYMBOLS = TARGET_ASSETS.map((asset) => `${asset.toLowerCase()}usdt`);
+const BINANCE_STREAM_URL = `wss://stream.binance.com:9443/stream?streams=${BINANCE_STREAM_SYMBOLS.map(symbol => `${symbol}@trade`).join('/')}`;
+const UI_UPDATE_INTERVAL_MS = 2000;
+type StrategyPeriod = '7d' | '30d' | 'all';
+const CATEGORY_OPTIONS: Array<{ label: string; value: TrendingCategory }> = [
+  { label: 'All', value: 'all' },
+  { label: 'Grid', value: 'grid' },
+  { label: 'DCA', value: 'dca' },
+  { label: 'Momentum', value: 'momentum' },
+  { label: 'Signal-based', value: 'signal-based' },
 ];
 
-const mockTrades: Trade[] = [
-  { id: '1', agent: '@agent_alpha', time: '2s ago', action: 'Buy', asset: '$BTC', amount: 0.45, price: 28140, status: 'Filled' },
-  { id: '2', agent: '@speed_demon', time: '8s ago', action: 'Sell', asset: '$ETH', amount: 12.4, price: 32520, status: 'Filled' },
-  { id: '3', agent: '@grid_master', time: '15s ago', action: 'Buy', asset: '$SOL', amount: 85.2, price: 12410, status: 'Filled' },
-  { id: '4', agent: '@agent_alpha', time: '45s ago', action: 'Sell', asset: '$BTC', amount: 0.12, price: 28450, status: 'Filled' },
-  { id: '5', agent: '@dark_pool', time: '1m ago', action: 'Buy', asset: '$SOL', amount: 1200, price: 123.5, status: 'Filled' },
-];
+const createPlaceholderTrade = (asset: string): Trade => ({
+  id: `placeholder-${asset}`,
+  agent: '@binance',
+  time: 'Live',
+  action: 'Buy',
+  asset: `$${asset}`,
+  amount: 0,
+  price: 0,
+  status: 'Loading',
+});
 
 const StrategyHub: React.FC = () => {
-  const [showTrades, setShowTrades] = useState(true);
-  const [trades, setTrades] = useState<Trade[]>(mockTrades);
+  const [trades, setTrades] = useState<Trade[]>(() => TARGET_ASSETS.map((asset) => createPlaceholderTrade(asset)));
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [isStrategiesLoading, setIsStrategiesLoading] = useState<boolean>(true);
   const [sortBy, setSortBy] = useState<'roi' | 'profit' | 'followers'>('roi');
-  const [filterType, setFilterType] = useState<string>('All');
-
-  const strategyTypes = ['All', 'Grid', 'DCA', 'Martingale', 'Momentum', 'Arbitrage', 'Signal-based'];
+  const [category, setCategory] = useState<TrendingCategory>('all');
+  const [period, setPeriod] = useState<StrategyPeriod>('30d');
+  const lastPriceByAssetRef = useRef<Record<string, number>>({});
+  const pendingTradesByAssetRef = useRef<Record<string, Trade>>({});
+  const latestTradesByAssetRef = useRef<Record<string, Trade>>({});
 
   // Parse followers string (e.g., '1.2k' -> 1200)
   const parseFollowers = (val: string) => {
@@ -36,8 +45,7 @@ const StrategyHub: React.FC = () => {
     return val.toLowerCase().includes('k') ? num * 1000 : num;
   };
 
-  const sortedStrategies = [...mockStrategies]
-    .filter(s => filterType === 'All' || s.type === filterType)
+  const sortedStrategies = [...strategies]
     .sort((a, b) => {
       if (sortBy === 'roi') return b.roi - a.roi;
       if (sortBy === 'profit') return b.profit - a.profit;
@@ -45,27 +53,250 @@ const StrategyHub: React.FC = () => {
       return 0;
     });
 
-  // Simulate real-time trades
   useEffect(() => {
-    const assets = ['$BTC', '$ETH', '$SOL', '$LINK', '$AVAX'];
-    const agents = ['@agent_alpha', '@speed_demon', '@grid_master', '@dark_pool', '@neuro_trader'];
+    let cancelled = false;
+    const rankBy = sortBy === 'profit' ? 'pnl' : sortBy;
+    const formatCategoryLabel = (value: unknown): string => {
+      if (typeof value !== 'string' || !value.trim()) return 'Signal-based';
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'signal-based') return 'Signal-based';
+      if (normalized === 'dca') return 'DCA';
+      return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    };
 
-    const interval = setInterval(() => {
-      const newTrade: Trade = {
-        id: Date.now().toString(),
-        agent: agents[Math.floor(Math.random() * agents.length)],
-        time: 'Just now',
-        action: Math.random() > 0.5 ? 'Buy' : 'Sell',
-        asset: assets[Math.floor(Math.random() * assets.length)],
-        amount: Math.floor(Math.random() * 1000) / 10,
-        price: Math.floor(Math.random() * 50000),
-        status: 'Filled'
+    const toNumber = (value: unknown, fallback = 0): number => {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string') {
+        const parsed = Number.parseFloat(value);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return fallback;
+    };
+
+    const toPairs = (value: unknown): string[] => {
+      if (Array.isArray(value)) {
+        return value.map(String).map((it) => it.toUpperCase());
+      }
+      if (typeof value === 'string') {
+        return value
+          .split(/[\/,_\-\s]+/)
+          .map((it) => it.trim().toUpperCase())
+          .filter(Boolean)
+          .slice(0, 2);
+      }
+      return ['BTC', 'USDT'];
+    };
+
+    const formatFollowers = (value: number): string => {
+      if (value >= 1000) return `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+      return Math.round(value).toString();
+    };
+
+    const formatProfitShare = (value: unknown): string => {
+      if (typeof value === 'string') return value.includes('%') ? value : `${value}%`;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        const pct = value <= 1 ? value * 100 : value;
+        return `${pct.toFixed(0)}%`;
+      }
+      return '10%';
+    };
+
+    const loadStrategies = async () => {
+      setIsStrategiesLoading(true);
+      try {
+        const res = await getTrendingStrategies({
+          category,
+          period,
+          rank_by: rankBy,
+          order: 'desc',
+          limit: 50,
+          offset: 0,
+        });
+        const rawList = Array.isArray(res.data) ? res.data : [];
+
+        const mapped: Strategy[] = rawList.map((item, idx) => {
+          const rawStrategyName = typeof item.strategy === 'string' && item.strategy.trim() ? item.strategy : '';
+          const name =
+            typeof item.name === 'string' && item.name.trim()
+              ? item.name
+              : rawStrategyName
+                ? rawStrategyName
+                : `Strategy #${idx + 1}`;
+          const idBase =
+            rawStrategyName ||
+            (typeof item.strategy_id === 'string' ? item.strategy_id : typeof item.id === 'string' ? item.id : name);
+          const id = idBase.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+          const followersNum = toNumber(item.followers, 0);
+          const pnl = toNumber(item.pnl, 0);
+          const roi = toNumber(item.roi, 0);
+
+          return {
+            id,
+            name,
+            author: typeof item.author === 'string' && item.author.trim() ? item.author : '@unknown',
+            version: typeof item.version === 'string' && item.version.trim() ? item.version : 'v1.0.0',
+            status: item.status === 'Idle' ? 'Idle' : 'Active',
+            roi,
+            profit: pnl,
+            followers: formatFollowers(followersNum),
+            tradingDays: toNumber(item.trading_days, period === '7d' ? 7 : period === '30d' ? 30 : 365),
+            icon: '🧠',
+            pairs: toPairs(item.pairs),
+            profitShare: formatProfitShare(item.profit_share),
+            type:
+              typeof item.type === 'string' && item.type.trim()
+                ? item.type
+                : item.category
+                  ? formatCategoryLabel(item.category)
+                : rawStrategyName
+                  ? rawStrategyName
+                  : 'Signal-based',
+            maxDrawdown: toNumber(item.max_drawdown, 0),
+          };
+        });
+
+        if (!cancelled) {
+          setStrategies(mapped);
+        }
+      } catch (error) {
+        console.error('Failed to load trending strategies:', error);
+        if (!cancelled) {
+          setStrategies([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsStrategiesLoading(false);
+        }
+      }
+    };
+
+    loadStrategies();
+    return () => {
+      cancelled = true;
+    };
+  }, [period, sortBy, category]);
+
+  // Subscribe to Binance public trades stream for real-time ticker data
+  useEffect(() => {
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushTimer: ReturnType<typeof setInterval> | null = null;
+    let manuallyClosed = false;
+
+    const loadInitialPrices = async () => {
+      try {
+        const symbols = encodeURIComponent(JSON.stringify(BINANCE_STREAM_SYMBOLS.map((symbol) => symbol.toUpperCase())));
+        const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbols=${symbols}`);
+        if (!res.ok) return;
+
+        const rows = (await res.json()) as Array<{ symbol: string; price: string }>;
+        const mapped: Record<string, Trade> = {};
+
+        for (const row of rows) {
+          const symbol = row.symbol.toUpperCase();
+          const baseAsset = symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol;
+          const price = Number.parseFloat(row.price);
+          if (!TARGET_ASSETS.includes(baseAsset as (typeof TARGET_ASSETS)[number])) continue;
+          if (!Number.isFinite(price)) continue;
+
+          lastPriceByAssetRef.current[baseAsset] = price;
+          mapped[baseAsset] = {
+            id: `snapshot-${baseAsset}`,
+            agent: '@binance',
+            time: 'Live',
+            action: 'Buy',
+            asset: `$${baseAsset}`,
+            amount: 0,
+            price: Number(price.toFixed(6)),
+            status: 'Filled',
+          };
+        }
+
+        latestTradesByAssetRef.current = mapped;
+        setTrades(TARGET_ASSETS.map((asset) => mapped[asset] ?? createPlaceholderTrade(asset)));
+      } catch (error) {
+        console.error('Failed to load initial Binance prices:', error);
+      }
+    };
+
+    const connect = () => {
+      socket = new WebSocket(BINANCE_STREAM_URL);
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data) as {
+            data?: {
+              s?: string;
+              t?: number;
+              p?: string;
+              q?: string;
+              T?: number;
+              m?: boolean;
+            };
+          };
+
+          const trade = payload.data;
+          if (!trade?.s || !trade.p || !trade.q) return;
+
+          const price = Number.parseFloat(trade.p);
+          const amount = Number.parseFloat(trade.q);
+          if (!Number.isFinite(price) || !Number.isFinite(amount)) return;
+
+          const symbol = trade.s.toUpperCase();
+          const baseAsset = symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol;
+          if (!TARGET_ASSETS.includes(baseAsset as (typeof TARGET_ASSETS)[number])) return;
+          const previousPrice = lastPriceByAssetRef.current[baseAsset];
+          const action: Trade['action'] = previousPrice !== undefined && price < previousPrice ? 'Sell' : 'Buy';
+          lastPriceByAssetRef.current[baseAsset] = price;
+
+          pendingTradesByAssetRef.current[baseAsset] = {
+            id: String(trade.t ?? Date.now()),
+            agent: '@binance',
+            time: trade.T ? new Date(trade.T).toLocaleTimeString() : 'Live',
+            action,
+            asset: `$${baseAsset}`,
+            amount: Number(amount.toFixed(4)),
+            price: Number(price.toFixed(2)),
+            status: 'Filled',
+          };
+        } catch (error) {
+          console.error('Failed to parse Binance trade message:', error);
+        }
       };
 
-      setTrades(prev => [newTrade, ...prev.slice(0, 19)]); // Keep last 20 trades
-    }, 4000);
+      socket.onerror = () => {
+        socket?.close();
+      };
 
-    return () => clearInterval(interval);
+      socket.onclose = () => {
+        if (manuallyClosed) return;
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+    };
+
+    flushTimer = setInterval(() => {
+      const pending = pendingTradesByAssetRef.current;
+      const keys = Object.keys(pending);
+      if (keys.length === 0) return;
+
+      latestTradesByAssetRef.current = {
+        ...latestTradesByAssetRef.current,
+        ...pending,
+      };
+      pendingTradesByAssetRef.current = {};
+
+      setTrades(TARGET_ASSETS.map((asset) => latestTradesByAssetRef.current[asset] ?? createPlaceholderTrade(asset)));
+    }, UI_UPDATE_INTERVAL_MS);
+
+    loadInitialPrices();
+    connect();
+
+    return () => {
+      manuallyClosed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (flushTimer) clearInterval(flushTimer);
+      socket?.close();
+    };
   }, []);
 
   const TradeTicker = () => {
@@ -93,20 +324,22 @@ const StrategyHub: React.FC = () => {
             {displayGroups.map((group, groupIdx) => (
               <div key={groupIdx} className="flex items-center h-11 w-full divide-x divide-white/5 shrink-0">
                 {group.map((trade, idx) => (
-                  <div key={`${trade.id}-${idx}`} className="flex items-center gap-4 h-full px-4 flex-1 min-w-0">
-                    <span className="text-[10px] font-bold text-white/30 font-mono truncate w-20 shrink-0">{trade.agent}</span>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md uppercase border ${trade.action === 'Buy'
-                        ? 'bg-green-500/10 text-[#10B981] border-green-500/10'
-                        : 'bg-red-500/10 text-[#EF4444] border-red-500/10'
+                  <div key={`${trade.id}-${idx}`} className="flex items-center gap-2.5 h-full px-3 flex-1 min-w-0">
+                    <div className="flex items-center gap-1 shrink-0">
+                      <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md uppercase border ${trade.status === 'Loading'
+                        ? 'bg-white/5 text-white/40 border-white/10'
+                        : trade.action === 'Buy'
+                          ? 'bg-green-500/10 text-[#10B981] border-green-500/10'
+                          : 'bg-red-500/10 text-[#EF4444] border-red-500/10'
                         }`}>
-                        {trade.action}
+                        {trade.status === 'Loading' ? 'Live' : trade.action}
                       </span>
                       <span className="text-[11px] font-black text-white/90 font-mono">{trade.asset}</span>
                     </div>
-                    <div className="flex items-center gap-2 ml-auto shrink-0">
-                      <span className="text-[11px] font-black text-white/70 font-mono">{trade.amount}</span>
-                      <span className="text-[9px] text-white/20 font-mono">@ ${trade.price.toLocaleString()}</span>
+                    <div className="flex items-center shrink-0">
+                      <span className="text-[10px] font-black text-white font-mono">
+                        {trade.status === 'Loading' ? '--' : `$${trade.price.toLocaleString()}`}
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -146,7 +379,9 @@ const StrategyHub: React.FC = () => {
     return (
       <div className="flex -space-x-1.5 items-center">
         {pairs.map((symbol, idx) => (
-          <TokenIcon key={idx} symbol={symbol} />
+          <div key={`${symbol}-${idx}`}>
+            <TokenIcon symbol={symbol} />
+          </div>
         ))}
       </div>
     );
@@ -169,16 +404,16 @@ const StrategyHub: React.FC = () => {
             {/* Filter & Sort Controls Row */}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-white/5">
               <div className="flex flex-wrap items-center gap-2">
-                {strategyTypes.map(type => (
+                {CATEGORY_OPTIONS.map((option) => (
                   <button
-                    key={type}
-                    onClick={() => setFilterType(type)}
-                    className={`px-4 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-wider transition-all border ${filterType === type
+                    key={option.value}
+                    onClick={() => setCategory(option.value)}
+                    className={`px-4 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-wider transition-all border ${category === option.value
                       ? 'bg-primary-accent border-primary-accent text-white shadow-lg shadow-primary-accent/20'
                       : 'bg-white/5 border-white/5 text-white/40 hover:text-white hover:bg-white/10'
                       }`}
                   >
-                    {type}
+                    {option.label}
                   </button>
                 ))}
               </div>
@@ -201,16 +436,39 @@ const StrategyHub: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-1 bg-white/5 p-1 rounded-xl border border-white/10">
-                  <button className="px-4 py-1.5 text-[11px] font-bold text-white/40 hover:text-white transition-colors">7d</button>
-                  <button className="px-4 py-1.5 text-[11px] font-bold bg-white/10 text-white rounded-lg">30d</button>
-                  <button className="px-4 py-1.5 text-[11px] font-bold text-white/40 hover:text-white transition-colors">All</button>
+                  <button
+                    onClick={() => setPeriod('7d')}
+                    className={`px-4 py-1.5 text-[11px] font-bold rounded-lg transition-colors ${period === '7d' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white'}`}
+                  >
+                    7d
+                  </button>
+                  <button
+                    onClick={() => setPeriod('30d')}
+                    className={`px-4 py-1.5 text-[11px] font-bold rounded-lg transition-colors ${period === '30d' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white'}`}
+                  >
+                    30d
+                  </button>
+                  <button
+                    onClick={() => setPeriod('all')}
+                    className={`px-4 py-1.5 text-[11px] font-bold rounded-lg transition-colors ${period === 'all' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white'}`}
+                  >
+                    All
+                  </button>
                 </div>
               </div>
             </div>
           </div>
 
-          <div className={`grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 transition-all duration-300`}>
-            {sortedStrategies.map((strat) => (
+          {isStrategiesLoading ? (
+            <div className="w-full py-16 flex items-center justify-center">
+              <div className="flex items-center gap-3 text-white/60 text-sm font-semibold">
+                <span className="inline-block w-4 h-4 border-2 border-white/20 border-t-primary-accent rounded-full animate-spin"></span>
+                Loading strategies...
+              </div>
+            </div>
+          ) : (
+            <div className={`grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 transition-all duration-300`}>
+              {sortedStrategies.map((strat) => (
               /* ... strategy cards ... */
               <Link
                 to={`/strategy/${strat.id}`}
@@ -265,8 +523,9 @@ const StrategyHub: React.FC = () => {
                   </div>
                 </div>
               </Link>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
       <TradeTicker />

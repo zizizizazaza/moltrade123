@@ -1,50 +1,209 @@
+import React, { useState, useEffect } from 'react';
+import { useParams } from 'react-router-dom';
+import { getAgent, type AgentResponse, type AgentHoldingRaw, type AgentTradeRaw } from '../api';
 
-import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+function formatEth(eth: string): string {
+  if (!eth || eth.length < 12) return eth;
+  return `${eth.slice(0, 6)}...${eth.slice(-6)}`;
+}
 
-const mockHoldings = [
-  {
-    name: '3EYES',
-    time: '3h ago',
-    unrealized: '+$1,760', unrealizedP: '+59.2%',
-    realized: '+$625.82', realizedP: '+82.4%',
-    total: '+$2,390', totalP: '+63.9%',
-    balance: '$4,740', tokens: '15M',
-    img: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAqR1WWf3TkeIhf2UrIN6PrB8Dv_o1z-haOjzaKao_ONQP80lWMjn5vw__EcgGM0UhwQk_OvRzww6gaBoHiYijzCn96tspcSwQr6ibycyhd-eYx2p58oPHZii0fvoXIq0iQBylED0Wpin-OcOpF3jfQshiNo8SnOPRixnnh1SvIrotwd-Vkr_OB56u9cuCB17byW_R02F3jH4X7NmV4f_cLcwBk5KyKavfAFyxWBR0SWyYhcO0o6wr357RQ13zf87V_KF_1KZ4Xuwo'
-  },
-  {
-    name: 'TOILET',
-    time: '4h ago',
-    unrealized: '+$106.41', unrealizedP: '+5%',
-    realized: 'HODL',
-    total: '+$106.41', totalP: '+5%',
-    balance: '$2,210', tokens: '12.1M',
-    img: 'https://lh3.googleusercontent.com/aida-public/AB6AXuCpGl9wIehgpQw61P9u4lPV2fI25QZeJbwyV0Or6vC0Zv2AP9L4XSxwulRr4dzE60esImP2P9DgO_TJBi5Iml4thDh_FEuNzyvV4rmZmjDeSuIHyxaWL3G61Em6LJfLazDdHiW7Avk4Wf5TRxy_q3Ngeo8TXSGN46FFtYOSqJNZyOlLY3aWXBpLNkNxZ26lRE6TOU3_QTWHoghqsZ2QZTK3gdTVOAFuoRMKHx85L7l4y3wZ1Zv4o09amjX9bM1mxKNakjAD7z7Jgo8'
-  },
-];
+function formatPnl(value: number | null | undefined): string {
+  if (value == null) return '—';
+  const sign = value >= 0 ? '+' : '';
+  return `${sign}${value.toFixed(2)}%`;
+}
 
-const mockTrades = [
-  { id: 1, type: 'Buy', name: '3EYES', time: '3h ago', price: '$0.000316', amount: '15M', total: '$4,740', img: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAqR1WWf3TkeIhf2UrIN6PrB8Dv_o1z-haOjzaKao_ONQP80lWMjn5vw__EcgGM0UhwQk_OvRzww6gaBoHiYijzCn96tspcSwQr6ibycyhd-eYx2p58oPHZii0fvoXIq0iQBylED0Wpin-OcOpF3jfQshiNo8SnOPRixnnh1SvIrotwd-Vkr_OB56u9cuCB17byW_R02F3jH4X7NmV4f_cLcwBk5KyKavfAFyxWBR0SWyYhcO0o6wr357RQ13zf87V_KF_1KZ4Xuwo' },
-  { id: 2, type: 'Sell', name: 'PEPE', time: '8h ago', price: '$0.000009', amount: '500M', total: '$4,500', img: 'https://cryptologos.cc/logos/pepe-pepe-logo.png?v=035', pnl: '+$1,240', pnlP: '+38%' },
-  { id: 3, type: 'Buy', name: 'TOILET', time: '12h ago', price: '$0.000182', amount: '12.1M', total: '$2,210', img: 'https://lh3.googleusercontent.com/aida-public/AB6AXuCpGl9wIehgpQw61P9u4lPV2fI25QZeJbwyV0Or6vC0Zv2AP9L4XSxwulRr4dzE60esImP2P9DgO_TJBi5Iml4thDh_FEuNzyvV4rmZmjDeSuIHyxaWL3G61Em6LJfLazDdHiW7Avk4Wf5TRxy_q3Ngeo8TXSGN46FFtYOSqJNZyOlLY3aWXBpLNkNxZ26lRE6TOU3_QTWHoghqsZ2QZTK3gdTVOAFuoRMKHx85L7l4y3wZ1Zv4o09amjX9bM1mxKNakjAD7z7Jgo8' },
-  { id: 4, type: 'Sell', name: 'WIF', time: '1d ago', price: '$2.42', amount: '1,200', total: '$2,904', img: 'https://cryptologos.cc/logos/dogwifhat-wif-logo.png?v=035', pnl: '+$450', pnlP: '+18.5%' },
-];
+function formatPnlUsd(value: number | null | undefined): string {
+  if (value == null) return '—';
+  const sign = value >= 0 ? '+' : '';
+  return `${sign}$${Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+}
+
+function formatVolume(v: number): string {
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
+  return `$${v.toFixed(2)}`;
+}
+
+function formatDurationSecs(secs: number | null | undefined): string {
+  if (secs == null || secs < 0) return '—';
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h`;
+  const m = Math.floor((secs % 3600) / 60);
+  return `${m}m`;
+}
+
+
+function mapHolding(h: AgentHoldingRaw, i: number): {
+  name: string;
+  time: string;
+  unrealized: string;
+  unrealizedP: string;
+  realized: string;
+  realizedP: string;
+  total: string;
+  totalP: string;
+  balance: string;
+  tokens: string;
+  img: string;
+} {
+  const un = h.unrealized_pnl ?? h.unrealized;
+  const unP = h.unrealized_pnl_pct ?? (typeof un === 'number' ? null : undefined);
+  const rl = h.realized_pnl ?? h.realized;
+  const tot = h.total_pnl ?? h.total;
+  const bal = h.balance;
+  const tok = h.tokens ?? h.trade_count;
+  const formatNum = (n: number | string | undefined) => (n == null ? '—' : typeof n === 'number' ? (n >= 0 ? `+$${n.toFixed(2)}` : `-$${Math.abs(n).toFixed(2)}`) : String(n));
+  const formatPct = (n: number | undefined) => (n == null ? '' : `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`);
+  return {
+    name: h.name ?? h.symbol ?? '—',
+    time: h.time ?? '—',
+    unrealized: typeof un === 'number' ? (un >= 0 ? `+$${un.toFixed(2)}` : `-$${Math.abs(un).toFixed(2)}`) : String(un ?? '—'),
+    unrealizedP: typeof unP === 'number' ? formatPct(unP) : '—',
+    realized: rl === undefined || rl === null ? 'HODL' : formatNum(rl as number),
+    realizedP: typeof (h as { realized_pnl_pct?: number }).realized_pnl_pct === 'number' ? formatPct((h as { realized_pnl_pct: number }).realized_pnl_pct) : '—',
+    total: typeof tot === 'number' ? (tot >= 0 ? `+$${tot.toFixed(2)}` : `-$${Math.abs(tot).toFixed(2)}`) : String(tot ?? '—'),
+    totalP: '—',
+    balance: bal != null ? (typeof bal === 'number' ? `$${bal.toLocaleString()}` : String(bal)) : '—',
+    tokens: tok != null ? String(tok) : '—',
+    img: h.img ?? `https://ui-avatars.com/api/?name=${encodeURIComponent(h.name ?? h.symbol ?? '')}&background=random&color=fff`,
+  };
+}
+
+
+function mapTrade(t: AgentTradeRaw, i: number): {
+  id: number | string;
+  type: 'Buy' | 'Sell';
+  name: string;
+  time: string;
+  price: string;
+  amount: string;
+  total: string;
+  pnl: string | null;
+  pnlP: string | null;
+  img: string;
+} {
+  const rawType = typeof t.type === 'string' ? t.type.toLowerCase() : '';
+  const rawSide = typeof t.side === 'string' ? t.side.toLowerCase() : '';
+  const type = (rawType === 'sell' || rawSide === 'short' ? 'Sell' : 'Buy') as 'Buy' | 'Sell';
+  const priceNum = typeof t.price === 'number' ? t.price : (typeof t.price === 'string' ? Number.parseFloat(t.price) : NaN);
+  const amountNum = typeof t.amount === 'number'
+    ? t.amount
+    : typeof t.size === 'number'
+      ? t.size
+      : typeof t.amount === 'string'
+        ? Number.parseFloat(t.amount)
+        : typeof t.size === 'string'
+          ? Number.parseFloat(t.size)
+          : NaN;
+  const totalNum = typeof t.total === 'number'
+    ? t.total
+    : typeof t.total === 'string'
+      ? Number.parseFloat(t.total)
+      : Number.isFinite(priceNum) && Number.isFinite(amountNum)
+        ? priceNum * amountNum
+        : NaN;
+  const pnlRaw = t.pnl ?? t.pnl_usd;
+  const timeLabel = t.time ?? (t.created_at ? new Date(t.created_at).toLocaleString() : '—');
+  return {
+    id: t.id ?? i,
+    type,
+    name: t.name ?? t.symbol ?? '—',
+    time: timeLabel,
+    price: Number.isFinite(priceNum) ? `$${priceNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—',
+    amount: Number.isFinite(amountNum) ? amountNum.toLocaleString('en-US', { maximumFractionDigits: 8 }) : '—',
+    total: Number.isFinite(totalNum) ? `$${totalNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—',
+    pnl: pnlRaw != null
+      ? (typeof pnlRaw === 'number'
+        ? `${pnlRaw >= 0 ? '+' : '-'}$${Math.abs(pnlRaw).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : String(pnlRaw))
+      : null,
+    pnlP: t.pnl_pct != null ? (typeof t.pnl_pct === 'number' ? `+${t.pnl_pct}%` : String(t.pnl_pct)) : null,
+    img: t.img ?? `https://ui-avatars.com/api/?name=${encodeURIComponent(t.name ?? t.symbol ?? '')}&background=random&color=fff`,
+  };
+}
 
 const AgentDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
+  const [agent, setAgent] = useState<AgentResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'holdings' | 'trades'>('holdings');
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!id) {
+      setLoading(false);
+      setAgent(null);
+      setError('Missing agent id');
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    getAgent(id)
+      .then((data) => {
+        if (cancelled) return;
+        setAgent(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Failed to load agent');
+        setAgent(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const copyEth = () => {
+    if (!agent?.eth_address) return;
+    navigator.clipboard.writeText(agent.eth_address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (loading) {
+    return (
+      <div className="pt-24 pb-20 px-6 flex items-center justify-center min-h-[60vh]">
+        <span className="material-symbols-outlined animate-spin text-4xl text-white/50">progress_activity</span>
+      </div>
+    );
+  }
+
+  if (error || !agent) {
+    return (
+      <div className="pt-24 pb-20 px-6 max-w-[1300px] mx-auto">
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-6 py-8 text-red-400 text-center">
+          {error ?? 'Agent not found'}
+        </div>
+      </div>
+    );
+  }
+
+  const winRate = agent.win_rate_7d ?? (agent.success_count_7d + agent.failure_count_7d > 0
+    ? (agent.success_count_7d / (agent.success_count_7d + agent.failure_count_7d)) * 100
+    : null);
+  const lossRate = winRate != null ? 100 - winRate : null;
+
+  const holdingsRows = agent.holdings.map(mapHolding);
+  const tradesRows = agent.trades.map(mapTrade);
 
   return (
     <div className="pt-24 pb-20 px-6 lg:px-12 max-w-[1300px] mx-auto animate-in fade-in duration-500">
-      {/* Header Section */}
+      {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-10 gap-6">
         <div className="flex items-center space-x-5">
           <div className="relative">
             <img
               alt="Agent Avatar"
               className="w-16 h-16 rounded-xl object-cover ring-2 ring-white/5"
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuCKglMQvK_Up5B1B-R6hjdcbldO3X9TslBrMXasfs3mLUkO59rAwo5HNVKbf9MLq06hoE4zeL1ZgPtm0cv2dJEcVaJrY5ZUFR7SzbamDGKKb_RgTe6XDC7bbP0f6MEP4rqJN2GPRd0FTTZRncQPM6q0NJL8Kd_k8Sj2RDGlKyqx0VEL90TTMKAWT7z0-OXELYafn10x4WDIo6oEemWd5P8dBl4FcPoaVHwiHuNBR2H0K_6hVgwtchaeR1tzvczFmKM1wsTGUDVeWR8"
+              src={`https://picsum.photos/seed/${agent.bot_pubkey}/128/128`}
             />
             <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-primary-accent rounded-full border-2 border-main-bg flex items-center justify-center">
               <span className="material-symbols-outlined text-[10px] text-white">bolt</span>
@@ -52,13 +211,15 @@ const AgentDetail: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center space-x-2">
-              <h1 className="text-2xl font-bold text-white tracking-tight capitalize">{id || 'Gake'}</h1>
+              <h1 className="text-2xl font-bold text-white tracking-tight">{agent.name || id || '—'}</h1>
               <span className="material-symbols-outlined text-blue-400 text-lg">verified</span>
             </div>
             <div className="flex items-center space-x-2 mt-1.5">
-              <span className="text-[11px] text-slate-500 font-mono bg-white/5 px-2 py-0.5 rounded border border-white/5">DNfuF1L...TyeBHm</span>
-              <button className="text-slate-500 hover:text-slate-300 transition-colors">
-                <span className="material-symbols-outlined text-sm">content_copy</span>
+              <span className="text-[11px] text-slate-500 font-mono bg-white/5 px-2 py-0.5 rounded border border-white/5">
+                {formatEth(agent.eth_address)}
+              </span>
+              <button type="button" onClick={copyEth} className="text-slate-500 hover:text-slate-300 transition-colors" title="Copy address">
+                <span className="material-symbols-outlined text-sm">{copied ? 'check' : 'content_copy'}</span>
               </button>
             </div>
           </div>
@@ -67,28 +228,31 @@ const AgentDetail: React.FC = () => {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-        {/* PNL Card */}
         <div className="bg-section-bg border border-white/10 rounded-xl p-6 flex flex-col justify-between shadow-lg">
           <div>
             <span className="text-white/30 text-[10px] font-bold uppercase tracking-widest">7D Realized PnL</span>
             <div className="mt-4">
-              <div className="text-4xl font-black text-[#10B981] tracking-tight">+41.56%</div>
-              <div className="text-xl font-bold text-[#10B981]/80 mt-1">+$38,942.00</div>
+              <div className={`text-4xl font-black tracking-tight ${(agent.realized_pnl_7d ?? 0) >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>
+                {formatPnlUsd(agent.realized_pnl_7d)}
+              </div>
             </div>
           </div>
           <div className="mt-8 grid grid-cols-2 gap-4 border-t border-white/5 pt-5">
             <div>
               <div className="text-white/20 text-[9px] font-black uppercase tracking-wider">Total PnL</div>
-              <div className="text-[#10B981] text-[14px] font-black">+$17.5M</div>
+              <div className={`text-[14px] font-black ${(agent.total_pnl ?? 0) >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>
+                {formatPnlUsd(agent.total_pnl)}
+              </div>
             </div>
             <div>
               <div className="text-white/20 text-[9px] font-black uppercase tracking-wider">Unrealized</div>
-              <div className="text-[#EF4444] text-[14px] font-black">-$496.8K</div>
+              <div className={`text-[14px] font-black ${(agent.unrealized_pnl ?? 0) >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>
+                {formatPnlUsd(agent.unrealized_pnl)}
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Analysis Card */}
         <div className="bg-section-bg border border-white/10 rounded-xl p-6 shadow-lg">
           <div className="flex items-center justify-between mb-8">
             <span className="text-white/30 text-[10px] font-bold uppercase tracking-widest">Analysis</span>
@@ -96,65 +260,71 @@ const AgentDetail: React.FC = () => {
           </div>
           <div className="space-y-4">
             <div className="flex justify-between items-center group">
-              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide group-hover:text-white transition-colors">Win Rate</span>
-              <span className="text-[14px] font-black text-white">57.14%</span>
+              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide">Win Rate</span>
+              <span className="text-[14px] font-black text-white">{winRate != null ? `${winRate.toFixed(2)}%` : '—'}</span>
             </div>
             <div className="flex justify-between items-center group">
-              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide group-hover:text-white transition-colors">Total TXs</span>
+              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide">Total TXs</span>
               <div className="flex items-center space-x-1.5">
-                <span className="text-[14px] font-black text-[#10B981]">47</span>
+                <span className="text-[14px] font-black text-[#10B981]">{agent.buy_count_7d}</span>
                 <span className="text-[11px] text-white/10 font-bold">/</span>
-                <span className="text-[14px] font-black text-[#EF4444]">98</span>
+                <span className="text-[14px] font-black text-[#EF4444]">{agent.sell_count_7d}</span>
               </div>
             </div>
             <div className="flex justify-between items-center group">
-              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide group-hover:text-white transition-colors">Volume</span>
-              <span className="text-[14px] font-black text-white/80">$250,400</span>
+              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide">Volume</span>
+              <span className="text-[14px] font-black text-white/80">{formatVolume(agent.volume_7d)}</span>
             </div>
             <div className="flex justify-between items-center group">
-              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide group-hover:text-white transition-colors">Avg Duration</span>
-              <span className="text-[14px] font-black text-white/60">7d 4h</span>
+              <span className="text-[12px] text-white/40 font-bold uppercase tracking-wide">Avg Duration</span>
+              <span className="text-[14px] font-black text-white/60">{formatDurationSecs(agent.avg_duration_7d_secs)}</span>
             </div>
           </div>
         </div>
 
-        {/* Distribution Card */}
         <div className="bg-section-bg border border-white/10 rounded-xl p-6 shadow-lg">
           <div className="flex items-center justify-between mb-8">
             <span className="text-white/30 text-[10px] font-bold uppercase tracking-widest">Distribution</span>
-            <span className="text-[9px] font-bold text-white/20 tracking-widest uppercase">Tokens: 182</span>
+            <span className="text-[9px] font-bold text-white/20 tracking-widest uppercase">Tokens: {agent.token_count_7d}</span>
           </div>
           <div className="space-y-3">
             <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest">
-              <span className="text-[#10B981]">Win Rate: 89.56%</span>
-              <span className="text-[#EF4444]">Loss Rate: 10.44%</span>
+              <span className="text-[#10B981]">Win Rate: {winRate != null ? `${winRate.toFixed(2)}%` : '—'}</span>
+              <span className="text-[#EF4444]">Loss Rate: {lossRate != null ? `${lossRate.toFixed(2)}%` : '—'}</span>
             </div>
             <div className="h-2.5 w-full bg-[#EF4444]/10 rounded-full overflow-hidden flex font-mono border border-white/5">
-              <div className="h-full bg-[#10B981] w-[89.56%] shadow-[0_0_15px_#10B981] opacity-90"></div>
-              <div className="h-full bg-[#EF4444]/40 w-[10.44%]"></div>
+              <div
+                className="h-full bg-[#10B981] shadow-[0_0_15px_#10B981] opacity-90 transition-all"
+                style={{ width: winRate != null ? `${winRate}%` : '0%' }}
+              />
+              <div
+                className="h-full bg-[#EF4444]/40 transition-all"
+                style={{ width: lossRate != null ? `${lossRate}%` : '0%' }}
+              />
             </div>
             <div className="grid grid-cols-2 gap-3 mt-6">
               <div className="bg-white/[0.02] p-3.5 rounded-xl border border-white/5">
                 <div className="text-[9px] text-white/20 font-black uppercase tracking-widest">Success</div>
-                <div className="text-lg font-black text-white/90 mt-0.5">163</div>
+                <div className="text-lg font-black text-white/90 mt-0.5">{agent.success_count_7d}</div>
               </div>
               <div className="bg-white/[0.02] p-3.5 rounded-xl border border-white/5">
                 <div className="text-[9px] text-white/20 font-black uppercase tracking-widest">Failure</div>
-                <div className="text-lg font-black text-white/90 mt-0.5">19</div>
+                <div className="text-lg font-black text-white/90 mt-0.5">{agent.failure_count_7d}</div>
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Holdings Table Section */}
+      {/* Holdings / Trades Table */}
       <div className="bg-[#1A1A1E] border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
         <div className="flex items-center border-b border-white/5 px-8">
           <div className="flex items-center space-x-10">
-            {['Holdings', 'Trades'].map((tab) => (
+            {(['Holdings', 'Trades'] as const).map((tab) => (
               <button
                 key={tab}
-                onClick={() => setActiveTab(tab.toLowerCase() as any)}
+                type="button"
+                onClick={() => setActiveTab(tab.toLowerCase() as 'holdings' | 'trades')}
                 className={`py-5 text-[11px] font-black uppercase tracking-[0.2em] transition-all ${activeTab === tab.toLowerCase() ? 'border-b-2 border-primary-accent text-white' : 'text-white/20 hover:text-white'}`}
               >
                 {tab}
@@ -177,7 +347,12 @@ const AgentDetail: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {mockHoldings.map((token, i) => (
+                  {holdingsRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-8 py-12 text-center text-white/30 text-sm">No holdings</td>
+                    </tr>
+                  )}
+                  {holdingsRows.map((token, i) => (
                     <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
                       <td className="px-8 py-5">
                         <div className="flex items-center space-x-3.5">
@@ -228,7 +403,12 @@ const AgentDetail: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {mockTrades.map((trade) => (
+                  {tradesRows.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-8 py-12 text-center text-white/30 text-sm">No trades</td>
+                    </tr>
+                  )}
+                  {tradesRows.map((trade) => (
                     <tr key={trade.id} className="hover:bg-white/[0.02] transition-colors group">
                       <td className="px-8 py-6 text-[11px] font-mono text-slate-500">{trade.time}</td>
                       <td className="px-8 py-6">
@@ -246,10 +426,10 @@ const AgentDetail: React.FC = () => {
                       <td className="px-8 py-6 text-right text-[12px] font-mono text-white/90">{trade.amount}</td>
                       <td className="px-8 py-6 text-right text-[12px] font-mono text-white/80 tracking-tight">{trade.total}</td>
                       <td className="px-8 py-6 text-right">
-                        {trade.pnl ? (
+                        {trade.pnl != null ? (
                           <>
                             <div className="text-emerald-500 font-black text-[12px] font-mono">{trade.pnl}</div>
-                            <div className="text-[9px] text-emerald-500/70 font-black tracking-widest font-mono">{trade.pnlP}</div>
+                            {trade.pnlP != null && <div className="text-[9px] text-emerald-500/70 font-black tracking-widest font-mono">{trade.pnlP}</div>}
                           </>
                         ) : (
                           <span className="text-slate-600 text-[10px] font-mono">--</span>
