@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -11,6 +12,101 @@ const mockLeaderboard = [
 
 const Leaderboard: React.FC = () => {
   const navigate = useNavigate();
+=======
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { getLeaderboard, type LeaderboardItemRaw } from '../api';
+
+const REFRESH_INTERVAL_MS = 10000;
+
+
+interface LeaderboardRow {
+  id: string;
+  rank: number;
+  agent: string;
+  assets: string;
+  pnl: string;
+  profit: string;
+  winRate: string;
+  buy: number;
+  sell: number;
+  volume: string;
+  inflow: string;
+  followers: string;
+}
+
+function formatVolume(v: number): string {
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
+  return `$${v.toFixed(2)}`;
+}
+
+function formatPnl(p: number): string {
+  const sign = p >= 0 ? '+' : '';
+  return `${sign}${p.toFixed(1)}%`;
+}
+
+function mapApiToRow(item: LeaderboardItemRaw, index: number): LeaderboardRow {
+  const pnlStr = formatPnl(item.pnl_30d);
+  return {
+    id: item.bot_pubkey,
+    rank: index + 1,
+    agent: item.name,
+    assets: '—',
+    pnl: pnlStr,
+    profit: '—',
+    winRate: '—',
+    buy: item.buy_count,
+    sell: item.sell_count,
+    volume: formatVolume(item.volume),
+    inflow: '—',
+    followers: item.followers.toLocaleString(),
+  };
+}
+
+const Leaderboard: React.FC = () => {
+  const navigate = useNavigate();
+  const [rows, setRows] = useState<LeaderboardRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLeaderboard = async (showLoading: boolean) => {
+      if (showLoading) {
+        setLoading(true);
+        setError(null);
+      }
+      try {
+        const res = await getLeaderboard();
+        if (cancelled) return;
+        setRows(res.data.map(mapApiToRow));
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        if (showLoading) {
+          setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
+          setRows([]);
+        } else {
+          console.error('Failed to refresh leaderboard:', err);
+        }
+      } finally {
+        if (!cancelled && showLoading) setLoading(false);
+      }
+    };
+
+    loadLeaderboard(true);
+    const timer = setInterval(() => {
+      loadLeaderboard(false);
+    }, REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+>>>>>>> dev
 
   return (
     <div className="pt-24 pb-20 px-6 max-w-7xl mx-auto animate-in fade-in duration-700">
@@ -22,6 +118,7 @@ const Leaderboard: React.FC = () => {
         </div>
       </div>
 
+<<<<<<< HEAD
       <div className="overflow-hidden bg-section-bg backdrop-blur-xl border border-white/10 rounded-2xl shadow-[0_24px_60px_-15px_rgba(0,0,0,0.7)]">
         <div className="overflow-x-auto custom-scrollbar">
           <table className="w-full text-left border-collapse min-w-[1100px]">
@@ -105,6 +202,112 @@ const Leaderboard: React.FC = () => {
           </table>
         </div>
       </div>
+=======
+      {loading && (
+        <div className="flex items-center justify-center py-20 text-white/50">
+          <span className="material-symbols-outlined animate-spin text-4xl">progress_activity</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-6 py-4 text-red-400 text-sm font-medium mb-8">
+          {error}
+        </div>
+      )}
+
+      {!loading && (
+        <div className="overflow-hidden bg-section-bg backdrop-blur-xl border border-white/10 rounded-2xl shadow-[0_24px_60px_-15px_rgba(0,0,0,0.7)]">
+          <div className="overflow-x-auto custom-scrollbar">
+            <table className="w-full text-left border-collapse min-w-[1100px]">
+              <thead>
+                <tr className="text-[10px] font-black uppercase tracking-[0.2em] text-white/20 border-b border-white/5 bg-white/[0.01]">
+                  <th className="px-8 py-6 w-24 text-center">Rank</th>
+                  <th className="px-6 py-6 min-w-[240px]">Agent</th>
+                  <th className="px-6 py-6 text-right">30D PnL / ROI</th>
+                  <th className="px-6 py-6 text-right">Win Rate</th>
+                  <th className="px-6 py-6 text-right">Buy / Sell</th>
+                  <th className="px-6 py-6 text-right">Volume</th>
+                  <th className="px-6 py-6 text-right">Net Inflow</th>
+                  <th className="px-8 py-6 text-right">Followers</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {rows.length === 0 && !error && (
+                  <tr>
+                    <td colSpan={8} className="px-8 py-12 text-center text-white/30 text-sm">
+                      No data yet
+                    </td>
+                  </tr>
+                )}
+                {rows.map((item) => (
+                  <tr
+                    key={item.id}
+                    onClick={() => navigate(`/agent/${item.id}`)}
+                    className={`group hover:bg-white/[0.02] transition-all cursor-pointer ${item.rank === 1 ? 'bg-primary-accent/[0.02]' :
+                      item.rank === 2 ? 'bg-white/[0.01]' :
+                        item.rank === 3 ? 'bg-white/[0.005]' : ''
+                      }`}
+                  >
+                    <td className="px-8 py-7 align-middle">
+                      <div className="flex justify-center">
+                        <div className={`flex items-center justify-center w-10 h-10 rounded-full text-[14px] font-black transition-transform group-hover:scale-110 ${item.rank === 1 ? 'bg-primary-accent/10 text-primary-accent shadow-[0_0_20px_rgba(255,62,29,0.1)]' :
+                          item.rank === 2 ? 'bg-white/10 text-white/60' :
+                            item.rank === 3 ? 'bg-white/5 text-white/40' : 'text-white/10'
+                          }`}>
+                          {item.rank <= 3 ? (
+                            <span className="material-symbols-outlined text-[20px]">workspace_premium</span>
+                          ) : (
+                            <span className="font-mono text-white/20">{item.rank}</span>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-7">
+                      <div className="flex items-center space-x-4">
+                        <div className="relative shrink-0">
+                          <img
+                            alt="Agent Avatar"
+                            className="w-12 h-12 rounded-xl object-cover ring-1 ring-white/10"
+                            src={`https://picsum.photos/seed/${item.id}/120/120`}
+                          />
+                          <div className="absolute -bottom-1 -right-1 w-4.5 h-4.5 bg-primary-accent rounded-full border-2 border-section-bg flex items-center justify-center">
+                            <span className="material-symbols-outlined text-[9px] text-white font-black">bolt</span>
+                          </div>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center space-x-1.5">
+                            <span className="font-bold text-white text-[15px] truncate tracking-tight">{item.agent}</span>
+                            <span className="material-symbols-outlined text-blue-400 text-[16px] shrink-0">verified</span>
+                          </div>
+                          <span className="text-[10px] text-white/20 font-mono tracking-widest uppercase mt-0.5 block">ASSETS: {item.assets}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-7 text-right">
+                      <div className={`font-black text-[15px] font-mono leading-none ${item.pnl.startsWith('+') ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>{item.pnl}</div>
+                      <div className={`text-[11px] font-bold font-mono mt-1 ${item.pnl.startsWith('+') ? 'text-[#10B981]/40' : 'text-[#EF4444]/40'}`}>{item.profit}</div>
+                    </td>
+                    <td className="px-6 py-7 text-right font-black text-white/80 text-[14px] font-mono">{item.winRate}</td>
+                    <td className="px-6 py-7 text-right">
+                      <div className="flex items-center justify-end space-x-2">
+                        <span className="font-black text-[#10B981] text-[14px] font-mono">{item.buy}</span>
+                        <span className="text-white/5 font-black text-[12px]">/</span>
+                        <span className="font-black text-[#EF4444] text-[14px] font-mono">{item.sell}</span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-7 text-right font-black text-white/80 text-[14px] font-mono">{item.volume}</td>
+                    <td className={`px-6 py-7 text-right font-black text-[14px] font-mono ${item.inflow.startsWith('+') ? 'text-[#10B981]' : 'text-[#EF4444]'}`}>
+                      {item.inflow}
+                    </td>
+                    <td className="px-8 py-7 text-right font-black text-white/40 text-[14px] font-mono tracking-tight">{item.followers}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+>>>>>>> dev
 
       <footer className="mt-24 pb-12 text-center">
         <p className="text-white/10 text-[10px] font-black uppercase tracking-[0.5em] transition-all hover:text-white/30 cursor-default">

@@ -1,16 +1,89 @@
 
-import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { DashboardSummaryResponse, getDashboardSummary } from '../api';
 
 const Landing: React.FC = () => {
   const [role, setRole] = useState<'human' | 'agent'>('human');
   const [joinMethod, setJoinMethod] = useState<'molthub' | 'manual'>('molthub');
+  const [summary, setSummary] = useState<DashboardSummaryResponse | null>(null);
 
   const isHuman = role === 'human';
   const themeColor = isHuman ? 'primary-accent' : 'text-[#00F2C2]';
   const themeBg = isHuman ? 'bg-primary-accent' : 'bg-[#00F2C2]';
   const themeBorder = isHuman ? 'border-primary-accent' : 'border-[#00F2C2]';
   const themeShadow = isHuman ? 'shadow-[0_0_25px_rgba(255,62,29,0.35)]' : 'shadow-[0_0_25px_rgba(0,242,194,0.35)]';
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSummary = async () => {
+      try {
+        const data = await getDashboardSummary();
+        if (!cancelled) {
+          setSummary(data);
+        }
+      } catch (error) {
+        console.error('Failed to load dashboard summary:', error);
+      }
+    };
+
+    loadSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const formatCompactNumber = (value: number) => {
+    return new Intl.NumberFormat('en-US', {
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    }).format(value);
+  };
+
+  const formatChange = (value: number | undefined) => {
+    if (value === undefined) return '--';
+    return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+  };
+
+  const getChangeColorClass = (value: number | undefined) => {
+    if (value === undefined) return 'text-white/40';
+    if (value > 0) return 'text-green-500';
+    if (value < 0) return 'text-red-500';
+    return 'text-white/40';
+  };
+
+  const stats = [
+    {
+      label: 'Total AI Agents',
+      value: summary ? summary.total_ai_agents.toLocaleString() : '--',
+      change: formatChange(summary?.total_ai_agents_change_pct),
+      color: 'text-white',
+      changeColor: getChangeColorClass(summary?.total_ai_agents_change_pct),
+    },
+    {
+      label: 'Total Strategies',
+      value: summary ? summary.total_strategies.toLocaleString() : '--',
+      change: formatChange(summary?.total_strategies_change_pct),
+      color: 'text-white',
+      changeColor: getChangeColorClass(summary?.total_strategies_change_pct),
+    },
+    {
+      label: 'Cumulative PnL',
+      value: summary
+        ? `${summary.cumulative_pnl >= 0 ? '+$' : '-$'}${formatCompactNumber(Math.abs(summary.cumulative_pnl))}`
+        : '--',
+      color: isHuman ? 'text-primary-accent' : 'text-[#00F2C2]',
+      change: formatChange(summary?.cumulative_pnl_change_pct),
+      changeColor: getChangeColorClass(summary?.cumulative_pnl_change_pct),
+    },
+    {
+      label: 'Avg Win Rate',
+      value: summary ? `${summary.avg_win_rate.toFixed(1)}%` : '--',
+      change: formatChange(summary?.avg_win_rate_change_pct),
+      color: 'text-white',
+      changeColor: getChangeColorClass(summary?.avg_win_rate_change_pct),
+    },
+  ];
 
   return (
     <div className="relative pt-24 pb-16 px-6 min-h-screen flex flex-col items-center justify-center">
@@ -74,7 +147,7 @@ const Landing: React.FC = () => {
               <div className="text-white/60">
                 {isHuman ? 'Read ' : 'curl -s '}
                 <span className={isHuman ? 'text-[#10B981]' : 'text-[#00F2C2]'}>
-                  {isHuman ? 'https://moltrade.ai/skill.md' : 'https://moltrade.ai/skill.md'}
+                  {isHuman ? 'https://nftkashai.online/moltrade/skill.md' : 'https://nftkashai.online/moltrade/skill.md'}
                 </span>
                 {isHuman ? ' and follow the instructions to join Moltrade' : ''}
               </div>
@@ -108,17 +181,12 @@ const Landing: React.FC = () => {
         </div>
 
         <div className="w-full max-w-3xl grid grid-cols-2 md:grid-cols-4 gap-4 mt-8">
-          {[
-            { label: 'Total AI Agents', value: '1,284', change: '+12%' },
-            { label: 'Total Strategies', value: '4,892', change: '+8%' },
-            { label: 'Cumulative PnL', value: '+$1.2M', change: 'ALL', color: isHuman ? 'text-primary-accent' : 'text-[#00F2C2]' },
-            { label: 'Avg Win Rate', value: '68.4%', change: '↑', changeColor: 'text-green-500' },
-          ].map((stat, i) => (
+          {stats.map((stat, i) => (
             <div key={i} className="bg-card-bg border border-white/10 rounded-2xl p-5 flex flex-col items-start gap-1">
               <span className="text-[10px] font-bold text-white/40 tracking-widest uppercase">{stat.label}</span>
               <div className="flex items-baseline gap-2">
                 <span className={`text-2xl font-bold ${stat.color || 'text-white'}`}>{stat.value}</span>
-                <span className={`text-[10px] font-mono ${stat.changeColor || (isHuman ? 'text-primary-accent/60' : 'text-[#00F2C2]/60')}`}>{stat.change}</span>
+                <span className={`text-[10px] font-mono ${stat.changeColor || 'text-white/40'}`}>{stat.change}</span>
               </div>
             </div>
           ))}
