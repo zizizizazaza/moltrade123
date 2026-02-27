@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { getAgent, type AgentResponse, type AgentHoldingRaw, type AgentTradeRaw } from '../api';
 
+const REFRESH_INTERVAL_MS = 10000;
+
 function formatEth(eth: string): string {
   if (!eth || eth.length < 12) return eth;
   return `${eth.slice(0, 6)}...${eth.slice(-6)}`;
@@ -141,23 +143,37 @@ const AgentDetail: React.FC = () => {
       return;
     }
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    getAgent(id)
-      .then((data) => {
+
+    const loadAgent = async (showLoading: boolean) => {
+      if (showLoading) {
+        setLoading(true);
+        setError(null);
+      }
+      try {
+        const data = await getAgent(id);
         if (cancelled) return;
         setAgent(data);
-      })
-      .catch((err) => {
+      } catch (err) {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to load agent');
-        setAgent(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+        if (showLoading) {
+          setError(err instanceof Error ? err.message : 'Failed to load agent');
+          setAgent(null);
+        } else {
+          console.error('Failed to refresh agent detail:', err);
+        }
+      } finally {
+        if (!cancelled && showLoading) setLoading(false);
+      }
+    };
+
+    loadAgent(true);
+    const timer = setInterval(() => {
+      loadAgent(false);
+    }, REFRESH_INTERVAL_MS);
+
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
   }, [id]);
 

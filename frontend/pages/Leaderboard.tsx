@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getLeaderboard, type LeaderboardItemRaw } from '../api';
 
+const REFRESH_INTERVAL_MS = 10000;
+
 
 interface LeaderboardRow {
   id: string;
@@ -55,23 +57,38 @@ const Leaderboard: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    getLeaderboard()
-      .then((res) => {
+
+    const loadLeaderboard = async (showLoading: boolean) => {
+      if (showLoading) {
+        setLoading(true);
+        setError(null);
+      }
+      try {
+        const res = await getLeaderboard();
         if (cancelled) return;
         setRows(res.data.map(mapApiToRow));
-      })
-      .catch((err) => {
+        setError(null);
+      } catch (err) {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
-        setRows([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+        if (showLoading) {
+          setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
+          setRows([]);
+        } else {
+          console.error('Failed to refresh leaderboard:', err);
+        }
+      } finally {
+        if (!cancelled && showLoading) setLoading(false);
+      }
+    };
+
+    loadLeaderboard(true);
+    const timer = setInterval(() => {
+      loadLeaderboard(false);
+    }, REFRESH_INTERVAL_MS);
+
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
   }, []);
 
