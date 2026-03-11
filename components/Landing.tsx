@@ -43,133 +43,351 @@ const Counter = ({ value, duration = 2000 }: { value: number; duration?: number 
     return <span ref={ref}>{count.toLocaleString()}</span>;
 };
 
-// --- Performance Chart Component ---
+// --- Performance Chart Component (Premium) ---
 const PerformanceChart = () => {
-    const points = 12;
-    const generateData = (start: number, volatility: number, trend: number, spikiness: number = 0) => {
-        let current = start;
-        return Array.from({ length: points }, (_, i) => {
-            if (i === 0) return { x: 0, y: 240 - current * 1.6 };
+    const svgRef = useRef<SVGSVGElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+    const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+    const { ref: chartViewRef, isInView: chartInView } = useInView();
 
-            // Base movement
-            let change = (Math.random() - 0.5) * volatility + trend;
+    const W = 880, H = 280;
 
-            // Add occasional sharp spikes for 'aggressive' traders
-            if (spikiness > 0 && Math.random() < 0.3) {
-                change += (Math.random() - 0.5) * spikiness * 3;
-            }
-
-            current += change;
-            // Floor at 5 to keep it on chart
-            current = Math.max(5, current);
-
-            return { x: i * 80, y: 240 - current * 1.6 };
-        });
-    };
-
-    const lines = [
-        { name: '0x71C...8e29', data: generateData(50, 8, 10, 5), color: '#a3ff12', width: 3, glow: true }, // Top performer, strong trend
-        { name: '0x1a2...f4b0', data: generateData(45, 2, 6, 0), color: '#3b82f6', width: 2, glow: false }, // Steady climber, very smooth
-        { name: '0x9c3...a1e2', data: generateData(40, 25, 4, 15), color: '#f59e0b', width: 2, glow: false }, // High volatility/Spiky
-        { name: '0x4d5...c8d7', data: generateData(35, 12, 5, 2), color: '#ec4899', width: 2, glow: false }, // Moderate
-        { name: '0x8b3...e9a1', data: generateData(30, 4, 3, 0), color: '#8b5cf6', width: 2, glow: false }, // Conservative, smooth
-        { name: '0x2e1...d6c3', data: generateData(25, 1, 1, 0), color: '#94a3b8', width: 1.5, glow: false, dashed: true }, // Index/Benchmark
+    // Fixed curated data for consistency
+    const linesData = [
+        {
+            name: '0x71C...8e29', color: '#a3ff12', width: 2.5, glow: true, label: 'Top Performer',
+            roi: '+312.4%',
+            points: [
+                { x: 0, y: 200 }, { x: 80, y: 185 }, { x: 160, y: 170 }, { x: 240, y: 145 },
+                { x: 320, y: 130 }, { x: 400, y: 105 }, { x: 480, y: 115 }, { x: 560, y: 90 },
+                { x: 640, y: 70 }, { x: 720, y: 55 }, { x: 800, y: 35 }, { x: 880, y: 20 }
+            ]
+        },
+        {
+            name: '0x1a2...f4b0', color: '#3b82f6', width: 2, glow: false, label: 'Steady Climber',
+            roi: '+187.2%',
+            points: [
+                { x: 0, y: 210 }, { x: 80, y: 200 }, { x: 160, y: 188 }, { x: 240, y: 175 },
+                { x: 320, y: 165 }, { x: 400, y: 148 }, { x: 480, y: 138 }, { x: 560, y: 125 },
+                { x: 640, y: 110 }, { x: 720, y: 95 }, { x: 800, y: 80 }, { x: 880, y: 68 }
+            ]
+        },
+        {
+            name: '0x9c3...a1e2', color: '#f59e0b', width: 2, glow: false, label: 'High Volatility',
+            roi: '+94.7%',
+            points: [
+                { x: 0, y: 195 }, { x: 80, y: 175 }, { x: 160, y: 200 }, { x: 240, y: 145 },
+                { x: 320, y: 170 }, { x: 400, y: 120 }, { x: 480, y: 155 }, { x: 560, y: 100 },
+                { x: 640, y: 140 }, { x: 720, y: 95 }, { x: 800, y: 130 }, { x: 880, y: 105 }
+            ]
+        },
+        {
+            name: '0x4d5...c8d7', color: '#ec4899', width: 2, glow: false, label: 'Moderate',
+            roi: '+68.1%',
+            points: [
+                { x: 0, y: 205 }, { x: 80, y: 198 }, { x: 160, y: 185 }, { x: 240, y: 178 },
+                { x: 320, y: 165 }, { x: 400, y: 155 }, { x: 480, y: 162 }, { x: 560, y: 148 },
+                { x: 640, y: 138 }, { x: 720, y: 132 }, { x: 800, y: 125 }, { x: 880, y: 120 }
+            ]
+        },
+        {
+            name: '0x8b3...e9a1', color: '#8b5cf6', width: 2, glow: false, label: 'Conservative',
+            roi: '+42.3%',
+            points: [
+                { x: 0, y: 215 }, { x: 80, y: 210 }, { x: 160, y: 205 }, { x: 240, y: 198 },
+                { x: 320, y: 192 }, { x: 400, y: 185 }, { x: 480, y: 180 }, { x: 560, y: 175 },
+                { x: 640, y: 168 }, { x: 720, y: 160 }, { x: 800, y: 155 }, { x: 880, y: 148 }
+            ]
+        },
+        {
+            name: 'Benchmark', color: '#cbd5e1', width: 1.5, glow: false, label: 'Index',
+            roi: '+12.0%', dashed: true,
+            points: [
+                { x: 0, y: 225 }, { x: 80, y: 222 }, { x: 160, y: 220 }, { x: 240, y: 218 },
+                { x: 320, y: 216 }, { x: 400, y: 214 }, { x: 480, y: 212 }, { x: 560, y: 210 },
+                { x: 640, y: 208 }, { x: 720, y: 206 }, { x: 800, y: 204 }, { x: 880, y: 202 }
+            ]
+        },
     ];
 
-    const toPath = (data: { x: number; y: number }[]) => {
-        return data.reduce((path, p, i) => i === 0 ? `M ${p.x} ${p.y}` : `${path} L ${p.x} ${p.y}`, '');
+    // Smooth cubic bezier path
+    const toSmoothPath = (pts: { x: number; y: number }[]) => {
+        if (pts.length < 2) return '';
+        let d = `M ${pts[0].x} ${pts[0].y}`;
+        for (let i = 1; i < pts.length; i++) {
+            const prev = pts[i - 1];
+            const curr = pts[i];
+            const cpx1 = prev.x + (curr.x - prev.x) * 0.4;
+            const cpx2 = curr.x - (curr.x - prev.x) * 0.4;
+            d += ` C ${cpx1} ${prev.y}, ${cpx2} ${curr.y}, ${curr.x} ${curr.y}`;
+        }
+        return d;
     };
 
+    // Area path (appends a close to bottom)
+    const toAreaPath = (pts: { x: number; y: number }[]) => {
+        const linePath = toSmoothPath(pts);
+        return `${linePath} L ${pts[pts.length - 1].x} ${H} L ${pts[0].x} ${H} Z`;
+    };
+
+    // Mouse tracking for crosshair
+    const handleMouseMove = (e: React.MouseEvent) => {
+        if (!containerRef.current) return;
+        const rect = containerRef.current.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * W;
+        const y = ((e.clientY - rect.top) / rect.height) * H;
+        setMousePos({ x, y });
+    };
+
+    // Time labels
+    const timeLabels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
     return (
-        <div className="relative w-full h-[480px] group select-none flex flex-col pt-2">
-            {/* Improved Legend - Compact & Integrated */}
-            <div className="flex flex-wrap gap-x-8 gap-y-3 mb-12 items-center">
-                <div className="text-[10px] font-black uppercase tracking-widest text-gray-300 mr-2">Top Performer Wallets</div>
-                {lines.map((l, i) => (
-                    <div key={i} className="flex items-center gap-2.5 group/item cursor-pointer">
-                        <div className={`w-3.5 h-1 rounded-full transition-all group-hover/item:w-6`} style={{ backgroundColor: l.color, opacity: l.dashed ? 0.3 : 1 }}></div>
-                        <span className="text-[11px] font-bold text-gray-400 font-mono tracking-tighter group-hover/item:text-black transition-colors">{l.name}</span>
+        <div ref={chartViewRef} className="relative w-full h-[480px] group select-none flex flex-col pt-2">
+            <style>{`
+                @keyframes drawLine {
+                    from { stroke-dashoffset: 2000; }
+                    to { stroke-dashoffset: 0; }
+                }
+                .chart-line-animate {
+                    stroke-dasharray: 2000;
+                    stroke-dashoffset: 2000;
+                }
+                .chart-line-animate.visible {
+                    animation: drawLine 2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+                }
+                .chart-area-animate {
+                    opacity: 0;
+                    transition: opacity 1.2s ease 0.8s;
+                }
+                .chart-area-animate.visible {
+                    opacity: 1;
+                }
+                .chart-dot-animate {
+                    opacity: 0;
+                    transform: scale(0);
+                    transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+                }
+                .chart-dot-animate.visible {
+                    opacity: 1;
+                    transform: scale(1);
+                    transition-delay: 1.8s;
+                }
+            `}</style>
+
+            {/* Legend */}
+            <div className="flex flex-wrap gap-x-6 gap-y-2.5 mb-8 items-center">
+                <div className="text-[9px] font-black uppercase tracking-[0.2em] text-gray-300 mr-1">Top Performers</div>
+                {linesData.map((l, i) => (
+                    <div
+                        key={i}
+                        className="flex items-center gap-2 cursor-pointer group/legend"
+                        onMouseEnter={() => setHoveredIndex(i)}
+                        onMouseLeave={() => setHoveredIndex(null)}
+                    >
+                        <div
+                            className="w-3 h-[3px] rounded-full transition-all duration-300 group-hover/legend:w-5 group-hover/legend:shadow-lg"
+                            style={{
+                                backgroundColor: l.color,
+                                opacity: l.dashed ? 0.4 : 1,
+                                boxShadow: hoveredIndex === i ? `0 0 8px ${l.color}60` : 'none'
+                            }}
+                        />
+                        <span className={`text-[10px] font-bold font-mono tracking-tighter transition-colors duration-200 ${hoveredIndex === i ? 'text-black' : 'text-gray-400'}`}>
+                            {l.name}
+                        </span>
+                        {hoveredIndex === i && (
+                            <span className="text-[9px] font-black ml-0.5 animate-fadeIn" style={{ color: l.color === '#cbd5e1' ? '#64748b' : l.color }}>
+                                {l.roi}
+                            </span>
+                        )}
                     </div>
                 ))}
             </div>
 
-            <div className="relative flex-1">
-                <svg className="w-full h-full overflow-visible" viewBox="0 0 880 280" preserveAspectRatio="none">
-                    {/* Horizontal Grid Lines */}
-                    {[0, 1, 2, 3, 4].map((i) => (
-                        <line key={`h-${i}`} x1="0" y1={i * 60 + 20} x2="880" y2={i * 60 + 20} stroke="#f1f5f9" strokeWidth="1" strokeDasharray="4 4" />
+            {/* Chart Area */}
+            <div
+                ref={containerRef}
+                className="relative flex-1 cursor-crosshair"
+                onMouseMove={handleMouseMove}
+                onMouseLeave={() => setMousePos(null)}
+            >
+                <svg
+                    ref={svgRef}
+                    className="w-full h-full overflow-visible"
+                    viewBox={`0 0 ${W} ${H}`}
+                    preserveAspectRatio="none"
+                >
+                    <defs>
+                        {/* Gradient fills for each line */}
+                        {linesData.map((l, i) => (
+                            <linearGradient key={`grad-${i}`} id={`area-grad-${i}`} x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor={l.color} stopOpacity={l.dashed ? 0.02 : 0.12} />
+                                <stop offset="100%" stopColor={l.color} stopOpacity={0} />
+                            </linearGradient>
+                        ))}
+                        {/* Glow filter for top performer */}
+                        <filter id="glow-filter" x="-50%" y="-50%" width="200%" height="200%">
+                            <feGaussianBlur stdDeviation="6" result="coloredBlur" />
+                            <feMerge>
+                                <feMergeNode in="coloredBlur" />
+                                <feMergeNode in="SourceGraphic" />
+                            </feMerge>
+                        </filter>
+                    </defs>
+
+                    {/* Subtle horizontal grid */}
+                    {[0, 1, 2, 3, 4, 5].map((i) => (
+                        <line
+                            key={`hg-${i}`}
+                            x1="0" y1={i * (H / 5)}
+                            x2={W} y2={i * (H / 5)}
+                            stroke="#f1f5f9" strokeWidth="0.8"
+                        />
                     ))}
 
-                    {/* Vertical Marker Lines */}
-                    {[1, 3, 5, 7, 9, 11].map((i) => (
-                        <line key={`v-${i}`} x1={i * 80} y1="20" x2={i * 80} y2="280" stroke="#f8fafc" strokeWidth="1" />
+                    {/* Vertical subtle grid */}
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((i) => (
+                        <line
+                            key={`vg-${i}`}
+                            x1={i * 80} y1="0"
+                            x2={i * 80} y2={H}
+                            stroke="#f8fafc" strokeWidth="0.5"
+                        />
                     ))}
 
-                    {/* The Lines */}
-                    {lines.map((l, i) => (
-                        <g key={i}>
+                    {/* Area fills - render bottom to top */}
+                    {[...linesData].reverse().map((l, ri) => {
+                        const i = linesData.length - 1 - ri;
+                        if (l.dashed) return null;
+                        return (
+                            <path
+                                key={`area-${i}`}
+                                d={toAreaPath(l.points)}
+                                fill={`url(#area-grad-${i})`}
+                                className={`chart-area-animate ${chartInView ? 'visible' : ''}`}
+                            />
+                        );
+                    })}
+
+                    {/* Lines */}
+                    {linesData.map((l, i) => (
+                        <g key={`line-${i}`}>
+                            {/* Glow shadow for top performer */}
                             {l.glow && (
                                 <path
-                                    d={toPath(l.data)}
+                                    d={toSmoothPath(l.points)}
                                     fill="none"
                                     stroke={l.color}
-                                    strokeWidth={12}
+                                    strokeWidth={10}
                                     strokeLinecap="round"
                                     strokeLinejoin="round"
-                                    className="opacity-5 blur-xl"
+                                    className={`chart-line-animate ${chartInView ? 'visible' : ''}`}
+                                    style={{ animationDelay: `${i * 0.15}s`, opacity: 0.08, filter: 'blur(8px)' }}
                                 />
                             )}
+                            {/* Main line */}
                             <path
-                                d={toPath(l.data)}
+                                d={toSmoothPath(l.points)}
                                 fill="none"
                                 stroke={l.color}
-                                strokeWidth={l.width}
+                                strokeWidth={hoveredIndex === i ? l.width + 1.5 : l.width}
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
-                                strokeDasharray={l.dashed ? "4 4" : "0"}
-                                className="transition-all duration-1000 origin-left"
-                            />
-                            {/* Final Node Marker */}
-                            <circle
-                                cx={l.data[l.data.length - 1].x}
-                                cy={l.data[l.data.length - 1].y}
-                                r={l.width + 1.5}
-                                fill={l.color}
-                                className="shadow-lg"
+                                strokeDasharray={l.dashed ? "6 4" : undefined}
+                                className={l.dashed ? '' : `chart-line-animate ${chartInView ? 'visible' : ''}`}
+                                style={{
+                                    animationDelay: `${i * 0.15}s`,
+                                    opacity: hoveredIndex !== null && hoveredIndex !== i ? 0.25 : 1,
+                                    transition: 'opacity 0.3s, stroke-width 0.3s',
+                                    ...(l.dashed ? { opacity: 0.4 } : {})
+                                }}
                             />
                         </g>
                     ))}
+
+                    {/* End dots */}
+                    {linesData.map((l, i) => {
+                        const last = l.points[l.points.length - 1];
+                        if (l.dashed) return null;
+                        return (
+                            <g key={`dot-${i}`} className={`chart-dot-animate ${chartInView ? 'visible' : ''}`}>
+                                {/* Pulse ring */}
+                                {l.glow && (
+                                    <circle
+                                        cx={last.x} cy={last.y} r={8}
+                                        fill="none" stroke={l.color} strokeWidth={1.5}
+                                        opacity={0.3}
+                                    >
+                                        <animate attributeName="r" values="4;12;4" dur="2.5s" repeatCount="indefinite" />
+                                        <animate attributeName="opacity" values="0.4;0;0.4" dur="2.5s" repeatCount="indefinite" />
+                                    </circle>
+                                )}
+                                <circle
+                                    cx={last.x} cy={last.y} r={l.width + 1}
+                                    fill={l.color}
+                                    style={{
+                                        filter: l.glow ? `drop-shadow(0 0 4px ${l.color}80)` : undefined,
+                                        opacity: hoveredIndex !== null && hoveredIndex !== i ? 0.25 : 1,
+                                        transition: 'opacity 0.3s'
+                                    }}
+                                />
+                                <circle cx={last.x} cy={last.y} r={1.5} fill="white" />
+                            </g>
+                        );
+                    })}
+
+                    {/* Hover crosshair */}
+                    {mousePos && (
+                        <g>
+                            <line x1={mousePos.x} y1="0" x2={mousePos.x} y2={H} stroke="#000" strokeWidth="0.5" strokeDasharray="3 3" opacity={0.15} />
+                            <line x1="0" y1={mousePos.y} x2={W} y2={mousePos.y} stroke="#000" strokeWidth="0.5" strokeDasharray="3 3" opacity={0.08} />
+                        </g>
+                    )}
                 </svg>
 
                 {/* Y-Axis Labels */}
-                <div className="absolute -left-10 inset-y-0 flex flex-col justify-between text-[10px] font-bold text-gray-300 pointer-events-none py-[15px]">
+                <div className="absolute -left-10 inset-y-0 flex flex-col justify-between text-[9px] font-bold text-gray-300 pointer-events-none py-0">
                     <span>150%</span>
-                    <span>100%</span>
-                    <span>50%</span>
+                    <span>120%</span>
+                    <span>80%</span>
+                    <span>40%</span>
                     <span>20%</span>
                     <span>0%</span>
+                </div>
+
+                {/* X-Axis Time Labels */}
+                <div className="absolute -bottom-5 left-0 right-0 flex justify-between text-[8px] font-bold text-gray-300 pointer-events-none px-0">
+                    {timeLabels.map((t, i) => (
+                        <span key={i}>{t}</span>
+                    ))}
                 </div>
             </div>
 
             {/* Bottom Stats Meta */}
-            <div className="mt-6 pt-6 border-t border-gray-100 flex justify-between items-end">
-                <div className="flex gap-16">
+            <div className="mt-10 pt-5 border-t border-gray-100 flex justify-between items-end">
+                <div className="flex gap-12">
                     <div>
-                        <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.15em] mb-1">Max Realized ROI</p>
+                        <p className="text-[9px] font-bold text-gray-400 uppercase tracking-[0.15em] mb-1.5">Max Realized ROI</p>
                         <p className="text-2xl font-black text-black tracking-tight">+312.4%</p>
                     </div>
                     <div>
-                        <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.15em] mb-1">Weekly Agg. PnL</p>
-                        <p className="text-2xl font-black text-[#a3ff12] font-mono tracking-tight">+$42.5K</p>
+                        <p className="text-[9px] font-bold text-gray-400 uppercase tracking-[0.15em] mb-1.5">Weekly Agg. PnL</p>
+                        <p className="text-2xl font-black text-[#a3ff12] font-mono tracking-tight" style={{ textShadow: '0 0 20px rgba(163,255,18,0.15)' }}>+$42.5K</p>
+                    </div>
+                    <div>
+                        <p className="text-[9px] font-bold text-gray-400 uppercase tracking-[0.15em] mb-1.5">Win Rate (7D)</p>
+                        <p className="text-2xl font-black text-black tracking-tight">84.2%</p>
                     </div>
                 </div>
                 <div className="text-right flex flex-col items-end">
-                    <div className="px-3 py-1.5 bg-gray-50/80 backdrop-blur-sm rounded border border-black/5 mb-2 group cursor-crosshair hover:bg-black hover:text-[#a3ff12] transition-colors">
-                        <span className="text-[10px] font-bold font-mono text-gray-400 group-hover:text-[#a3ff12] transition-colors">polymarket_raw_stream.v3.01</span>
+                    <div className="px-3 py-1.5 bg-gray-50/80 backdrop-blur-sm rounded-lg border border-black/5 mb-2 group cursor-crosshair hover:bg-black hover:text-[#a3ff12] transition-all duration-300">
+                        <span className="text-[9px] font-bold font-mono text-gray-400 group-hover:text-[#a3ff12] transition-colors">polymarket_raw_stream.v3.01</span>
                     </div>
                     <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse ring-2 ring-green-500/20"></div>
-                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.2em]">Live Feed Active</span>
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse ring-2 ring-emerald-500/20"></div>
+                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-[0.2em]">Live Feed Active</span>
                     </div>
                 </div>
             </div>

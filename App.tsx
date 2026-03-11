@@ -82,7 +82,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-12">
           <div className="flex items-center gap-3 cursor-pointer group" onClick={() => setCurrentPage(Page.LANDING)}>
             <div className="w-8 h-8 bg-black rounded flex items-center justify-center font-black text-white group-hover:rotate-12 transition-transform">M</div>
-            <span className="text-xl font-bold tracking-tight text-black">MoltCash</span>
+            <span className="text-xl font-bold tracking-tight text-black">Moltrade</span>
           </div>
 
           <div className="hidden lg:flex items-center gap-10">
@@ -95,11 +95,6 @@ const App: React.FC = () => {
               active={currentPage === Page.CHAT}
               onClick={() => setCurrentPage(Page.CHAT)}
               label="Trade"
-            />
-            <NavButton
-              active={currentPage === Page.TASKS}
-              onClick={() => setCurrentPage(Page.TASKS)}
-              label="Tasks"
             />
           </div>
         </div>
