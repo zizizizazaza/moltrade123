@@ -1,101 +1,224 @@
 
-import React, { useState, useEffect } from 'react';
-import { Icons, COLORS } from './constants';
-import { Page } from './types';
-import Dashboard from './components/Dashboard';
-import Swap from './components/Swap';
-import Market from './components/Market';
-import AgentMode from './components/AgentMode';
-import Portfolio from './components/Portfolio';
-import Chat from './components/Chat';
-import AuthModal from './components/AuthModal';
-import TxModal from './components/TxModal';
+import React, { useEffect, useRef, useState } from 'react';
+import { useLogin, usePrivy, useSigners, useWallets } from '@privy-io/react-auth';
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { Icons } from './constants';
+import { setApiAuthTokenProvider, syncUserWallet } from './api';
+import { config } from './config';
+import CopyTradePanel from './components/CopyTradePanel';
 import Landing from './components/Landing';
-import Settings from './components/Settings';
-import Tasks from './components/Tasks';
-import Leaderboard from './components/Leaderboard';
-import TaskDetail from './components/TaskDetail';
-import Groups from './components/Groups';
+import TradePage from './components/TradePage';
+import TxModal from './components/TxModal';
+import SmartMoneyPage from './components/SmartMoneyPage';
+import TraderDetailPage from './components/TraderDetailPage';
+
+type WalletLike = {
+  address?: string;
+  connectorType?: string;
+  walletClientType?: string;
+  walletClient?: string;
+};
+
+function isOAuthCallback(): boolean {
+  if (typeof window === 'undefined') return false;
+  const q = window.location.search || '';
+  return /[?&](code|state|privy_oauth)=/i.test(q) || q.includes('code=') || q.includes('state=');
+}
+
+function clearOAuthParams(): void {
+  if (typeof window === 'undefined') return;
+  const url = window.location.pathname || '/';
+  window.history.replaceState({}, '', url);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pickPrimaryConnectedPrivyWallet(wallets: WalletLike[] | undefined): WalletLike | null {
+  if (!wallets?.length) return null;
+  const embedded = wallets.find((wallet) => {
+    const connectorType = String(wallet.connectorType || '').toLowerCase();
+    const walletClientType = String(wallet.walletClientType || '').toLowerCase();
+    const walletClient = String(wallet.walletClient || '').toLowerCase();
+    return (
+      connectorType === 'embedded' ||
+      walletClientType === 'privy' ||
+      walletClient === 'privy'
+    );
+  });
+  return embedded || null;
+}
 
 const App: React.FC = () => {
-  const [currentPage, setCurrentPage] = useState<Page>(Page.LANDING);
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [isWalletConnected, setIsWalletConnected] = useState(false);
-  const [showComingSoon, setShowComingSoon] = useState(false);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { authenticated, logout, ready, getAccessToken, user } = usePrivy();
+  const { wallets, ready: walletsReady } = useWallets();
+  const { addSigners } = useSigners();
+  const { login } = useLogin({
+    onComplete: () => {},
+    onError: (error) => {
+      console.error('Privy login failed', error);
+    },
+  });
+
   const [showDropdown, setShowDropdown] = useState(false);
-  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
+  const [oauthCallbackInProgress, setOauthCallbackInProgress] = useState(() => isOAuthCallback());
+  const syncedWalletRef = useRef<string | null>(null);
+  const syncingWalletRef = useRef<string | null>(null);
+
+  const primaryWallet = pickPrimaryConnectedPrivyWallet(
+    wallets as unknown as WalletLike[] | undefined
+  );
+  const primaryWalletAddress = primaryWallet?.address || null;
+  const isWalletConnected = ready && authenticated;
+  const displayAddress = primaryWalletAddress
+    ? `${primaryWalletAddress.slice(0, 5)}...${primaryWalletAddress.slice(-4)}`
+    : 'Connect';
 
   useEffect(() => {
-    const handleNav = () => setCurrentPage(Page.CHAT);
-    const handleNavSwap = () => setCurrentPage(Page.SWAP);
-    const handleNavMarket = () => setCurrentPage(Page.MARKET);
-
-    window.addEventListener('loka-nav-chat', handleNav);
-    window.addEventListener('loka-nav-swap', handleNavSwap);
-    window.addEventListener('loka-nav-market', handleNavMarket);
-
+    setApiAuthTokenProvider(async () => {
+      try {
+        return await getAccessToken();
+      } catch {
+        return null;
+      }
+    });
     return () => {
-      window.removeEventListener('loka-nav-chat', handleNav);
-      window.removeEventListener('loka-nav-swap', handleNavSwap);
-      window.removeEventListener('loka-nav-market', handleNavMarket);
+      setApiAuthTokenProvider(null);
     };
-  }, []);
+  }, [getAccessToken]);
 
-  const triggerComingSoon = () => {
-    setShowComingSoon(true);
-    setTimeout(() => setShowComingSoon(false), 3000);
+  useEffect(() => {
+    if (!ready || !authenticated || !walletsReady) return;
+    const addr = primaryWalletAddress;
+    if (!addr) return;
+    if (syncedWalletRef.current === addr.toLowerCase()) return;
+    if (syncingWalletRef.current === addr.toLowerCase()) return;
+
+    (async () => {
+      syncingWalletRef.current = addr.toLowerCase();
+      console.log('[privy] start wallet sync flow', {
+        userId: user?.id,
+        walletAddress: addr,
+        wallets: (wallets as unknown as WalletLike[] | undefined)?.map((wallet) => ({
+          address: wallet.address,
+          walletClientType: wallet.walletClientType,
+          connectorType: wallet.connectorType,
+        })),
+      });
+
+      if (config.privyKeyQuorumId) {
+        try {
+          let result: unknown = null;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try {
+              result = await addSigners({
+                address: addr,
+                signers: [
+                  {
+                    signerId: config.privyKeyQuorumId,
+                    policyIds: [],
+                  },
+                ],
+              });
+              break;
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              if (/duplicate signer\(s\) provided/i.test(msg)) {
+                console.log('[privy] signer already attached, continue', {
+                  walletAddress: addr,
+                  signerId: config.privyKeyQuorumId,
+                });
+                result = { duplicate: true };
+                break;
+              }
+              if (!/wallet proxy not initialized/i.test(msg) || attempt === 3) {
+                throw err;
+              }
+              console.warn(`[privy] addSigners retry ${attempt} after wallet proxy init wait`);
+              await sleep(1200);
+            }
+          }
+          console.log('[privy] addSigners result', {
+            walletAddress: addr,
+            signerId: config.privyKeyQuorumId,
+            result,
+          });
+        } catch (err) {
+          console.error('[privy] addSigners failed', err);
+        }
+      } else {
+        console.error('[privy] privyKeyQuorumId is not configured');
+      }
+
+      console.log('[privy] calling syncUserWallet', { walletAddress: addr });
+      await syncUserWallet(addr);
+      syncedWalletRef.current = addr.toLowerCase();
+    })()
+      .catch((err) => {
+        console.error('[privy] sync wallet failed', err);
+      })
+      .finally(() => {
+        syncingWalletRef.current = null;
+      });
+  }, [ready, authenticated, walletsReady, primaryWalletAddress, addSigners, user?.id, wallets]);
+
+  useEffect(() => {
+    setShowDropdown(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!oauthCallbackInProgress) return;
+    if (ready && authenticated) {
+      setOauthCallbackInProgress(false);
+      clearOAuthParams();
+      return;
+    }
+    const t = setTimeout(() => {
+      setOauthCallbackInProgress(false);
+      clearOAuthParams();
+    }, 12000);
+    return () => clearTimeout(t);
+  }, [ready, authenticated, oauthCallbackInProgress]);
+
+  const openLoginModal = () => {
+    if (!ready || authenticated) return;
+    login({
+      loginMethods: ['google', 'twitter', 'wallet'],
+    });
   };
 
-  const connectWallet = () => {
-    setShowAuthModal(true);
-  };
-
-  const handleLogin = () => {
-    setIsWalletConnected(true);
-    setShowAuthModal(false);
-  };
-
-  const isChatPage = currentPage === Page.CHAT;
-
-  return (
-    <div className="min-h-screen flex flex-col selection:bg-black selection:text-white overflow-x-hidden bg-[#fafafa]">
-      {/* Toast Notification */}
-      <div className={`fixed top-6 right-6 z-[100] transition-all duration-500 transform ${showComingSoon ? 'translate-x-0 opacity-100' : 'translate-x-12 opacity-0 pointer-events-none'
-        }`}>
-        <div className="bg-black text-white px-6 py-3 rounded-2xl shadow-2xl border border-white/10 flex items-center gap-3">
-          <span className="text-sm">⏳</span>
-          <p className="text-xs font-bold tracking-widest ">Coming soon</p>
+  if (oauthCallbackInProgress) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-[#fafafa] selection:bg-black selection:text-white">
+        <div className="animate-fadeIn flex flex-col items-center gap-4">
+          <div className="w-10 h-10 border-2 border-black border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm font-bold text-black tracking-wide">Signing you in...</p>
         </div>
       </div>
+    );
+  }
 
-      {showAuthModal && (
-        <AuthModal
-          onLogin={handleLogin}
-          onClose={() => setShowAuthModal(false)}
-        />
-      )}
+  const hideFooter = location.pathname === '/trade';
 
+  return (
+    <div className="min-h-screen flex flex-col selection:bg-black selection:text-white overflow-x-clip bg-[#fafafa]">
       <TxModal />
 
-      {/* Navbar - Refined Light Mode */}
-      <nav className="sticky top-0 z-40 py-6 px-6 md:px-12 flex items-center justify-between bg-white/80 backdrop-blur-md border-b border-gray-100">
+      <nav className="sticky top-0 z-50 py-6 px-6 md:px-12 flex items-center justify-between bg-white/80 backdrop-blur-md border-b border-gray-100">
         <div className="flex items-center gap-12">
-          <div className="flex items-center gap-3 cursor-pointer group" onClick={() => setCurrentPage(Page.LANDING)}>
+          <NavLink to="/" className="flex items-center gap-3 cursor-pointer group">
             <div className="w-8 h-8 bg-black rounded flex items-center justify-center font-black text-white group-hover:rotate-12 transition-transform">M</div>
             <span className="text-xl font-bold tracking-tight text-black">Moltrade</span>
-          </div>
+          </NavLink>
 
           <div className="hidden lg:flex items-center gap-10">
-            <NavButton
-              active={currentPage === Page.LANDING}
-              onClick={() => setCurrentPage(Page.LANDING)}
-              label="Home"
-            />
-            <NavButton
-              active={currentPage === Page.CHAT}
-              onClick={() => setCurrentPage(Page.CHAT)}
-              label="Trade"
-            />
+            <NavButton to="/" label="Home" />
+            <NavButton to="/trade" label="Trade" />
+            <NavButton to="/smartmoney" label="Smart Money" />
+            <NavButton to="/copytrade" label="Copytrade" />
           </div>
         </div>
 
@@ -114,32 +237,34 @@ const App: React.FC = () => {
             <button
               onClick={() => {
                 if (!isWalletConnected) {
-                  connectWallet();
+                  openLoginModal();
                 } else {
-                  setShowDropdown(!showDropdown);
+                  setShowDropdown((prev) => !prev);
                 }
               }}
-              className={`px-5 py-2.5 rounded-full text-xs font-bold tracking-widest transition-all border flex items-center justify-between gap-2.5 ${isWalletConnected
-                ? 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100 hover:text-black cursor-pointer'
-                : 'bg-black text-white hover:bg-gray-800 shadow-md'
-                }`}
+              className={`px-5 py-2.5 rounded-full text-xs font-bold tracking-widest transition-all border flex items-center justify-between gap-2.5 ${
+                isWalletConnected
+                  ? 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100 hover:text-black cursor-pointer'
+                  : 'bg-black text-white hover:bg-gray-800 shadow-md'
+              }`}
             >
               {isWalletConnected ? (
                 <>
-                  <span>0x71C...8e29</span>
+                  <span>{displayAddress}</span>
                   <svg className={`w-3.5 h-3.5 transition-transform ${showDropdown ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" /></svg>
                 </>
-              ) : 'Connect'}
+              ) : (
+                'Connect'
+              )}
             </button>
 
-            {/* Dropdown Menu */}
             {isWalletConnected && showDropdown && (
               <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-gray-100 rounded-2xl shadow-xl overflow-hidden py-1.5 z-50 animate-in fade-in slide-in-from-top-2">
                 <button
                   onClick={() => {
-                    setIsWalletConnected(false);
+                    logout();
                     setShowDropdown(false);
-                    if (currentPage === Page.PORTFOLIO || currentPage === Page.SETTINGS) setCurrentPage(Page.LANDING);
+                    navigate('/');
                   }}
                   className="w-full text-left px-5 py-3 text-sm font-bold text-red-500 hover:text-red-600 hover:bg-red-50 transition-colors flex items-center gap-3"
                 >
@@ -152,55 +277,28 @@ const App: React.FC = () => {
         </div>
       </nav>
 
-      {/* Mobile Nav */}
       <div className="md:hidden fixed bottom-8 left-1/2 -translate-x-1/2 z-50 glass rounded-full p-2 flex gap-1 shadow-2xl bg-white/90">
-        <MobileNavButton active={currentPage === Page.LANDING} onClick={() => setCurrentPage(Page.LANDING)} icon={<Icons.Dashboard />} />
+        <MobileNavButton to="/" icon={<Icons.Dashboard />} />
+        <MobileNavButton to="/trade" icon={<span className="text-xs font-bold">T</span>} />
+        <MobileNavButton to="/smartmoney" icon={<span className="text-xs font-bold">S</span>} />
+        <MobileNavButton to="/copytrade" icon={<span className="text-xs font-bold">C</span>} />
       </div>
 
-      {/* Main Content */}
-      <main className={`flex-1 overflow-y-auto ${isChatPage || currentPage === Page.LANDING ? 'p-0' : 'container mx-auto px-6 py-12'}`}>
-        {currentPage !== Page.PORTFOLIO && currentPage !== Page.MARKET && currentPage !== Page.SWAP && currentPage !== Page.CHAT && currentPage !== Page.LANDING && currentPage !== Page.SETTINGS && currentPage !== Page.TASKS && currentPage !== Page.TASK_DETAIL && (
-          <div className="mb-12">
-            <h1 className="font-serif text-5xl md:text-7xl mb-4 text-black">
-              {currentPage === Page.DASHBOARD && "MoltCash Protocol"}
-              {currentPage === Page.AGENT && "Agentic Stack."}
-            </h1>
-            <p className="text-gray-500 text-lg max-w-2xl">
-              {currentPage === Page.DASHBOARD && "The on-chain liquidity protocol backed by US Treasuries and powered by verified AI cash flows."}
-              {currentPage === Page.AGENT && "Enabling machine-to-machine economy with the x402 protocol."}
-            </p>
-          </div>
-        )}
-
-        {currentPage === Page.DASHBOARD && <Dashboard />}
-        {currentPage === Page.SWAP && <Swap />}
-        {currentPage === Page.MARKET && <Market />}
-        {currentPage === Page.AGENT && <AgentMode />}
-        {currentPage === Page.PORTFOLIO && <Portfolio isWalletConnected={isWalletConnected} onConnect={connectWallet} onSettingsClick={() => setCurrentPage(Page.SETTINGS)} />}
-        {currentPage === Page.SETTINGS && <Settings onBack={() => setCurrentPage(Page.PORTFOLIO)} />}
-        {currentPage === Page.CHAT && <Chat />}
-        {currentPage === Page.TASKS && (
-          <Tasks
-            onSelectTask={(id) => {
-              setSelectedTaskId(id);
-              setCurrentPage(Page.TASK_DETAIL);
-            }}
-          />
-        )}
-        {currentPage === Page.TASK_DETAIL && selectedTaskId !== null && (
-          <TaskDetail
-            taskId={selectedTaskId}
-            onBack={() => setCurrentPage(Page.TASKS)}
-          />
-        )}
-        {currentPage === Page.LANDING && <Landing />}
+      <main className="flex-1">
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/trade" element={<TradePage />} />
+          <Route path="/smartmoney" element={<SmartMoneyPage />} />
+          <Route path="/smartmoney/:wallet" element={<TraderDetailPage />} />
+          <Route path="/copytrade" element={<CopyTradePanel />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </main>
 
-      {/* Footer with Manual Trigger */}
-      {currentPage !== Page.CHAT && (
+      {!hideFooter && (
         <footer className="py-12 border-t border-gray-100 text-center px-6">
           <div className="flex flex-col items-center gap-4">
-            <p className="text-gray-300 text-[10px]  tracking-[0.4em] font-medium">
+            <p className="text-gray-300 text-[10px] tracking-[0.4em] font-medium">
               Powered by Setu Infrastructure &bull; 2026 MoltCash Protocol
             </p>
           </div>
@@ -210,24 +308,28 @@ const App: React.FC = () => {
   );
 };
 
-const NavButton: React.FC<{ active: boolean; label: string; onClick: () => void }> = ({ active, label, onClick }) => (
-  <button
-    onClick={onClick}
-    className={`text-sm font-bold tracking-wide transition-all py-1 border-b-2 ${active ? 'text-black border-black' : 'text-gray-400 hover:text-black border-transparent'
-      }`}
+const NavButton: React.FC<{ to: string; label: string }> = ({ to, label }) => (
+  <NavLink
+    to={to}
+    end={to === '/'}
+    className={({ isActive }) => `text-sm font-bold tracking-wide transition-all py-1 border-b-2 ${
+      isActive ? 'text-black border-black' : 'text-gray-400 hover:text-black border-transparent'
+    }`}
   >
     {label}
-  </button>
+  </NavLink>
 );
 
-const MobileNavButton: React.FC<{ active: boolean; icon: React.ReactNode; onClick: () => void }> = ({ active, icon, onClick }) => (
-  <button
-    onClick={onClick}
-    className={`p-3 rounded-full transition-all ${active ? 'bg-black text-white' : 'text-gray-400 hover:text-black'
-      }`}
+const MobileNavButton: React.FC<{ to: string; icon: React.ReactNode }> = ({ to, icon }) => (
+  <NavLink
+    to={to}
+    end={to === '/'}
+    className={({ isActive }) => `p-3 rounded-full transition-all ${
+      isActive ? 'bg-black text-white' : 'text-gray-400 hover:text-black'
+    }`}
   >
     {icon}
-  </button>
+  </NavLink>
 );
 
 export default App;

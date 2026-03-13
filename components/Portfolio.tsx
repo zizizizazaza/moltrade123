@@ -2,6 +2,8 @@
 import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, Tooltip, ResponsiveContainer, CartesianGrid, YAxis, XAxis } from 'recharts';
 import { Icons } from '../constants';
+import { useWallets } from '@privy-io/react-auth';
+import { fetchTradeHistory, fetchUserPositions, WalletPositionItem, CopyExecutionItem } from '../api';
 
 // Generate 90 days of dummy data
 const generateChartData = () => {
@@ -29,12 +31,15 @@ interface PortfolioProps {
 }
 
 const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConnect, onSettingsClick }) => {
+  const { wallets } = useWallets();
   const [balance] = useState(12450.88);
   const [yieldAccumulated, setYieldAccumulated] = useState(0.00012);
   const [isHidden, setIsHidden] = useState(false);
   const [greeting, setGreeting] = useState('Good Morning');
 
-  const walletAddress = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+  const walletAddress = wallets?.[0]?.address || "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+  const [positions, setPositions] = useState<WalletPositionItem[]>([]);
+  const [history, setHistory] = useState<CopyExecutionItem[]>([]);
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<'holdings' | 'activity'>('holdings');
   const [timeframe, setTimeframe] = useState('7D');
@@ -51,6 +56,26 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
     else if (hour < 18) setGreeting('Good Afternoon');
     else setGreeting('Good Evening');
   }, []);
+
+  useEffect(() => {
+    if (!isWalletConnected || !walletAddress) return;
+    let mounted = true;
+    Promise.all([
+      fetchUserPositions(walletAddress),
+      fetchTradeHistory(walletAddress, 20),
+    ])
+      .then(([p, h]) => {
+        if (!mounted) return;
+        setPositions(p || []);
+        setHistory(h || []);
+      })
+      .catch(() => {
+        // keep mock values if api unavailable
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [isWalletConnected, walletAddress]);
 
   const getFilteredData = () => {
     if (timeframe === '7D') return chartData.slice(-7);
@@ -275,73 +300,80 @@ const Portfolio: React.FC<PortfolioProps> = ({ isWalletConnected = false, onConn
           {activeTab === 'holdings' ? (
             <section className="space-y-4 animate-fadeIn">
               <div className="grid grid-cols-1 gap-4">
-                <AllocationCard
-                  title="AIUSD"
-                  desc="Treasury Backed Stablecoin"
-                  apy="5.24% APY"
-                  amount="$10,340.00"
-                  earnings="+$340.00"
-                  icon={<div className="w-6 h-6 bg-black rounded flex items-center justify-center font-black text-white text-[10px]">A</div>}
-                  onClick={() => window.dispatchEvent(new CustomEvent('loka-nav-swap'))}
-                  action={
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('loka-nav-swap')); }}
-                        className="px-4 py-1.5 bg-gray-100/80 text-black text-[11px] font-bold rounded-full hover:bg-gray-200 transition-colors shadow-sm"
-                      >
-                        Add
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('loka-nav-swap')); }}
-                        className="px-4 py-1.5 bg-black text-white text-[11px] font-bold rounded-full hover:bg-gray-800 transition-colors shadow-sm"
-                      >
-                        Sell
-                      </button>
-                    </div>
-                  }
-                />
-                <AllocationCard
-                  title="ComputeDAO - GPU Expansion"
-                  statusBadge={<span className="bg-green-50 text-green-600 px-2 py-0.5 rounded-md text-[9px] font-black">Funded</span>}
-                  apy="15.5% APY · 60d"
-                  amount="$5,000.00"
-                  earnings="+$387.50"
-                  icon={<div className="w-6 h-6 bg-green-500 rounded flex items-center justify-center font-black text-white text-[10px]">C</div>}
-                  onClick={() => {
-                    window.dispatchEvent(new CustomEvent('loka-nav-market'));
-                    setTimeout(() => window.dispatchEvent(new CustomEvent('loka-open-asset', { detail: 'ComputeDAO' })), 100);
-                  }}
-                />
+                {positions.length === 0 && (
+                  <AllocationCard
+                    title="AIUSD"
+                    desc="Treasury Backed Stablecoin"
+                    apy="5.24% APY"
+                    amount="$10,340.00"
+                    earnings="+$340.00"
+                    icon={<div className="w-6 h-6 bg-black rounded flex items-center justify-center font-black text-white text-[10px]">A</div>}
+                    onClick={() => window.dispatchEvent(new CustomEvent('loka-nav-swap'))}
+                    action={
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('loka-nav-swap')); }}
+                          className="px-4 py-1.5 bg-gray-100/80 text-black text-[11px] font-bold rounded-full hover:bg-gray-200 transition-colors shadow-sm"
+                        >
+                          Add
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('loka-nav-swap')); }}
+                          className="px-4 py-1.5 bg-black text-white text-[11px] font-bold rounded-full hover:bg-gray-800 transition-colors shadow-sm"
+                        >
+                          Sell
+                        </button>
+                      </div>
+                    }
+                  />
+                )}
+                {positions.slice(0, 8).map((p) => (
+                  <AllocationCard
+                    key={`${p.condition_id}-${p.outcome_index}`}
+                    title={p.title || `Condition ${p.condition_id.slice(0, 8)}`}
+                    desc={p.outcome || 'Position'}
+                    apy={`Avg ${((p.avg_price || 0) * 100).toFixed(1)}c`}
+                    amount={`$${(p.current_value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                    earnings={`${(p.cash_pnl || 0) >= 0 ? '+' : ''}$${(p.cash_pnl || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                    icon={<div className="w-6 h-6 bg-green-500 rounded flex items-center justify-center font-black text-white text-[10px]">P</div>}
+                    onClick={() => window.dispatchEvent(new CustomEvent('loka-nav-market'))}
+                  />
+                ))}
               </div>
             </section>
           ) : (
             <section className="space-y-4 animate-fadeIn">
               <div className="glass rounded-[32px] overflow-hidden bg-white shadow-sm border border-gray-100">
-                <ActivityItem
-                  title="Daily Interest Payout"
-                  time="Today, 08:00 AM"
-                  source="AIUSD"
-                  amount="+$5.24"
-                  type="INTEREST"
-                  onSourceClick={() => window.dispatchEvent(new CustomEvent('loka-nav-swap'))}
-                />
-                <ActivityItem
-                  title="USDC Deposit"
-                  time="Yesterday, 04:15 PM"
-                  amount="+$1,000.00"
-                  type="DEPOSIT"
-                />
-                <ActivityItem
-                  title="Daily Interest Payout"
-                  time="Jan 22, 08:00 AM"
-                  source="ComputeDAO - GPU Expansion"
-                  amount="+$5.10"
-                  type="INTEREST"
-                  onSourceClick={() => {
-                    window.dispatchEvent(new CustomEvent('loka-nav-market'));
-                    setTimeout(() => window.dispatchEvent(new CustomEvent('loka-open-asset', { detail: 'ComputeDAO' })), 100);
-                  }}
-                />
+                {history.length === 0 ? (
+                  <>
+                    <ActivityItem
+                      title="Daily Interest Payout"
+                      time="Today, 08:00 AM"
+                      source="AIUSD"
+                      amount="+$5.24"
+                      type="INTEREST"
+                      onSourceClick={() => window.dispatchEvent(new CustomEvent('loka-nav-swap'))}
+                    />
+                    <ActivityItem
+                      title="USDC Deposit"
+                      time="Yesterday, 04:15 PM"
+                      amount="+$1,000.00"
+                      type="DEPOSIT"
+                    />
+                  </>
+                ) : (
+                  history.map((h) => (
+                    <ActivityItem
+                      key={h.exec_id}
+                      title={`Copytrade ${h.status}`}
+                      time={new Date(h.created_at).toLocaleString()}
+                      source={`${h.side} · ${h.market_id.slice(0, 8)}...`}
+                      amount={`${h.amount_usd >= 0 ? '+' : ''}$${Number(h.amount_usd || 0).toFixed(2)}`}
+                      type={h.status === 'failed' ? 'DEPOSIT' : 'INTEREST'}
+                      onSourceClick={() => window.dispatchEvent(new CustomEvent('loka-nav-market'))}
+                    />
+                  ))
+                )}
               </div>
             </section>
           )}

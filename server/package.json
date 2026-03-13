@@ -1,0 +1,15 @@
+{
+  "name": "moltcash_polymarket",
+  "version": "1.0.0",
+  "description": "Minimal FastAPI implementation based on `polymarket.md`. Market APIs now try live data from Gamma first, then fallback to local mock data if the request fails.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

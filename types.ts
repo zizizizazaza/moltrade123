@@ -49,6 +49,7 @@ export enum Page {
   DASHBOARD = 'DASHBOARD',
   SWAP = 'SWAP',
   MARKET = 'MARKET',
+  COPYTRADE = 'COPYTRADE',
   PORTFOLIO = 'PORTFOLIO',
   AGENT = 'AGENT',
   CHAT = 'CHAT',

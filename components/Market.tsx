@@ -3,6 +3,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 import { Icons, COLORS } from '../constants';
 import { MarketAsset } from '../types';
+import { BackendMarketItem, fetchMarkets } from '../api';
 
 const MOCK_ASSETS: MarketAsset[] = [
   {
@@ -131,25 +132,97 @@ const MOCK_ASSETS: MarketAsset[] = [
   }
 ];
 
+function mapMarketItemToAsset(item: BackendMarketItem, idx: number): MarketAsset {
+  const yes = Number(item.yes_price || 0);
+  const discount = Math.max(0.01, Math.min(0.99, yes));
+  const faceValue = 100;
+  const askPrice = Number((faceValue * discount).toFixed(2));
+  const targetAmount = Math.max(50000, Math.round(Number(item.liquidity || 0) || 50000));
+  const raisedAmount = Math.max(
+    0,
+    Math.min(targetAmount, Math.round(Number(item.volume || 0) || targetAmount * 0.6))
+  );
+  const progress = targetAmount > 0 ? raisedAmount / targetAmount : 0;
+  let status: MarketAsset['status'] = 'Fundraising';
+  if (!item.active) status = 'Failed';
+  else if (progress >= 1) status = 'Funded';
+  else if (progress >= 0.85) status = 'Ending Soon';
+
+  return {
+    id: item.market_id,
+    title: item.question,
+    subtitle: item.slug,
+    category:
+      item.category?.toLowerCase().includes('crypto')
+        ? 'Compute'
+        : item.category?.toLowerCase().includes('sports')
+          ? 'E-commerce'
+          : 'SaaS',
+    issuer: 'Polymarket',
+    issuerLogo:
+      'https://images.unsplash.com/photo-1599305096101-fe118399c63b?auto=format&fit=crop&q=80&w=100',
+    faceValue,
+    askPrice,
+    apy: Number((8 + yes * 12).toFixed(1)),
+    durationDays: 30 + ((idx % 3) + 1) * 15,
+    creditScore: 700 + Math.round(yes * 200),
+    status,
+    targetAmount,
+    raisedAmount,
+    backersCount: Math.max(10, Math.round((Number(item.volume || 0) + 1) / 1000)),
+    remainingCap: Math.max(0, targetAmount - raisedAmount),
+    coverageRatio: Number((1.1 + yes).toFixed(2)),
+    verifiedSource: 'Polymarket API',
+    description: item.question,
+    useOfFunds: 'Market position funding via Polymarket CLOB.',
+    monthlyRevenue: [
+      { month: 'Aug', amount: Math.max(50000, raisedAmount * 0.6) },
+      { month: 'Sep', amount: Math.max(55000, raisedAmount * 0.7) },
+      { month: 'Oct', amount: Math.max(60000, raisedAmount * 0.8) },
+      { month: 'Nov', amount: Math.max(65000, raisedAmount * 0.9) },
+      { month: 'Dec', amount: Math.max(70000, raisedAmount) },
+      { month: 'Jan', amount: Math.max(75000, raisedAmount * 1.1) },
+    ],
+    coverImage:
+      'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&q=80&w=800',
+  };
+}
+
 const Market: React.FC = () => {
+  const [assets, setAssets] = useState<MarketAsset[]>(MOCK_ASSETS);
   const [selectedAsset, setSelectedAsset] = useState<MarketAsset | null>(null);
   const [filter, setFilter] = useState<'All' | 'Fundraising' | 'Funded' | 'Failed'>('All');
 
   const filteredAssets = useMemo(() => {
-    if (filter === 'All') return MOCK_ASSETS;
-    return MOCK_ASSETS.filter(a => a.status === filter);
-  }, [filter]);
+    if (filter === 'All') return assets;
+    return assets.filter(a => a.status === filter);
+  }, [filter, assets]);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchMarkets(60)
+      .then((rows) => {
+        if (!mounted || !rows.length) return;
+        setAssets(rows.map(mapMarketItemToAsset));
+      })
+      .catch(() => {
+        // fallback to mock assets
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const handleOpenAsset = (e: Event) => {
       const customEvent = e as CustomEvent;
-      const match = MOCK_ASSETS.find(a => a.title.includes(customEvent.detail));
+      const match = assets.find(a => a.title.includes(customEvent.detail));
       if (match) setSelectedAsset(match);
     };
 
     window.addEventListener('loka-open-asset', handleOpenAsset);
     return () => window.removeEventListener('loka-open-asset', handleOpenAsset);
-  }, []);
+  }, [assets]);
 
   if (selectedAsset) {
     return (

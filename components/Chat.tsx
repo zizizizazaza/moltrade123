@@ -1,8 +1,36 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import Tooltip from './Tooltip';
 import { Icons } from '../constants';
+import { usePrivy, useWallets } from '@privy-io/react-auth';
+import {
+    CopyTaskItem,
+    CopyPerformance,
+    WalletPositionItem,
+    fetchCopyTasks,
+    fetchSmartMoney,
+    fetchWalletPositions,
+    fetchUserPositions,
+    fetchCopyPerformance,
+    SmartMoneyWalletItem,
+    startCopyTrading,
+} from '../api';
+
+type WalletLike = { address?: string; connectorType?: string; walletClientType?: string; walletClient?: string };
+function pickEmbeddedWallet(wallets: WalletLike[]): WalletLike | null {
+    return wallets.find(w => {
+        const ct = String(w.connectorType || '').toLowerCase();
+        const wct = String(w.walletClientType || '').toLowerCase();
+        const wc = String(w.walletClient || '').toLowerCase();
+        return ct === 'embedded' || wct === 'privy' || wc === 'privy';
+    }) || null;
+}
 
 const Chat: React.FC = () => {
+    const { authenticated, ready } = usePrivy();
+    const { wallets, ready: walletsReady } = useWallets();
+    const primaryWallet = pickEmbeddedWallet(wallets as unknown as WalletLike[] || []);
+    const primaryWalletAddress = primaryWallet?.address || null;
     // Add custom style to hide scrollbar
     useEffect(() => {
         const style = document.createElement('style');
@@ -38,6 +66,7 @@ const Chat: React.FC = () => {
     const [currentSquadName, setCurrentSquadName] = useState<string | null>(null);
     const [expandedHandlers, setExpandedHandlers] = useState<Set<number>>(new Set([0])); // Default open first one
     const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
+    const [selectedCopyWallet, setSelectedCopyWallet] = useState<SmartMoneyWalletItem | null>(null);
     const [copyTarget, setCopyTarget] = useState('');
     const [copyTag, setCopyTag] = useState('');
     const [copyValue, setCopyValue] = useState('100'); // % or fixed
@@ -48,18 +77,120 @@ const Chat: React.FC = () => {
     const [copySpendLimit, setCopySpendLimit] = useState('5000');
     const [copyBuyAtMin, setCopyBuyAtMin] = useState(true);
     const [copySyncSell, setCopySyncSell] = useState(true);
+    const [copyDryRun, setCopyDryRun] = useState(true);
+    const [smartWallets, setSmartWallets] = useState<SmartMoneyWalletItem[]>([]);
+    const [copyTasks, setCopyTasks] = useState<CopyTaskItem[]>([]);
+    const [copySubmitting, setCopySubmitting] = useState(false);
+    const [copyTaskError, setCopyTaskError] = useState<string | null>(null);
+    const [copyTaskSuccess, setCopyTaskSuccess] = useState<string | null>(null);
+
+    // Real portfolio state
+    const [userPositions, setUserPositions] = useState<WalletPositionItem[]>([]);
+    const [userPositionsLoading, setUserPositionsLoading] = useState(false);
+    const [copyPerformanceMap, setCopyPerformanceMap] = useState<Record<string, CopyPerformance>>({});
+
+    // Computed portfolio values from real positions
+    const totalBalance = userPositions.reduce((sum, p) => sum + (p.current_value || 0), 0);
+    const totalPnl = userPositions.reduce((sum, p) => sum + (p.cash_pnl || 0), 0);
+    const totalCost = userPositions.reduce((sum, p) => sum + (p.size * p.avg_price), 0);
+    const rateOfReturn = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
     useEffect(() => {
-        if (selectedEntity) {
+        if (selectedCopyWallet) {
+            const label = selectedCopyWallet.user_name || selectedCopyWallet.wallet;
+            setCopyTarget(selectedCopyWallet.wallet);
+            setCopyTag(`# ${label.toLowerCase().replace(/\s+/g, '_')}`);
+        } else if (selectedEntity) {
             setCopyTarget(selectedEntity);
             setCopyTag(`# ${selectedEntity.toLowerCase().replace(/\s+/g, '_')}`);
         }
-    }, [selectedEntity]);
+    }, [selectedEntity, selectedCopyWallet]);
 
     const isCopyingEntity = (name: string) => {
-        const copyingNames = ['Theo4', 'Fredi9999']; // This would normally come from actual state
-        return copyingNames.includes(name);
+        if (selectedCopyWallet) {
+            return copyTasks.some((task) =>
+                task.status !== 'stopped' &&
+                task.source_wallet.toLowerCase() === selectedCopyWallet.wallet.toLowerCase()
+            );
+        }
+        return copyTasks.some((task) => (task.reason || '').includes(name));
     };
+
+    // Fetch smart money wallets (public API, no auth needed)
+    useEffect(() => {
+        let mounted = true;
+        fetchSmartMoney(12)
+            .then((rows) => {
+                if (!mounted) return;
+                setSmartWallets(rows);
+            })
+            .catch(() => {
+                if (!mounted) return;
+                setSmartWallets([]);
+            });
+        return () => {
+            mounted = false;
+        };
+    }, []);
+
+    // Fetch copy tasks (requires auth — wait until Privy is ready)
+    useEffect(() => {
+        if (!ready || !authenticated) return;
+        let mounted = true;
+        fetchCopyTasks(20)
+            .then((rows) => {
+                if (!mounted) return;
+                setCopyTasks(rows);
+            })
+            .catch(() => {
+                if (!mounted) return;
+                setCopyTasks([]);
+            });
+        return () => {
+            mounted = false;
+        };
+    }, [ready, authenticated]);
+
+    // Fetch user's own positions for portfolio sidebar
+    useEffect(() => {
+        if (!ready || !authenticated || !walletsReady || !primaryWalletAddress) return;
+        let mounted = true;
+        setUserPositionsLoading(true);
+        fetchUserPositions(primaryWalletAddress)
+            .then((positions) => {
+                if (!mounted) return;
+                setUserPositions(positions);
+            })
+            .catch(() => {
+                if (!mounted) return;
+                setUserPositions([]);
+            })
+            .finally(() => {
+                if (mounted) setUserPositionsLoading(false);
+            });
+        return () => { mounted = false; };
+    }, [ready, authenticated, walletsReady, primaryWalletAddress]);
+
+    // Fetch copy performance for each active copy task
+    useEffect(() => {
+        if (!copyTasks.length) return;
+        const activeTasks = copyTasks.filter(t => t.status !== 'stopped');
+        if (!activeTasks.length) return;
+        let mounted = true;
+        Promise.allSettled(
+            activeTasks.map(t =>
+                fetchCopyPerformance(t.task_id).then(perf => ({ taskId: t.task_id, perf }))
+            )
+        ).then(results => {
+            if (!mounted) return;
+            const map: Record<string, CopyPerformance> = {};
+            results.forEach(r => {
+                if (r.status === 'fulfilled') map[r.value.taskId] = r.value.perf;
+            });
+            setCopyPerformanceMap(map);
+        });
+        return () => { mounted = false; };
+    }, [copyTasks]);
 
     const toggleHandler = (idx: number) => {
         setExpandedHandlers(prev => {
@@ -68,6 +199,25 @@ const Chat: React.FC = () => {
             else next.add(idx);
             return next;
         });
+    };
+
+    const formatCompactUsd = (value: number) => {
+        const abs = Math.abs(value);
+        if (abs >= 1_000_000) return `${value >= 0 ? '+' : '-'}$${(abs / 1_000_000).toFixed(2)}M`;
+        if (abs >= 1_000) return `${value >= 0 ? '+' : '-'}$${(abs / 1_000).toFixed(1)}K`;
+        return `${value >= 0 ? '+' : '-'}$${abs.toFixed(0)}`;
+    };
+
+    const shortenAddress = (value: string) =>
+        value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : value;
+
+    const reloadCopyTasks = async () => {
+        try {
+            const rows = await fetchCopyTasks(20);
+            setCopyTasks(rows);
+        } catch {
+            // ignore refresh errors in UI shell
+        }
     };
 
     useEffect(() => {
@@ -95,118 +245,152 @@ const Chat: React.FC = () => {
         }
     }, []);
 
-    const getSquadAgents = (name: string) => {
-        const mockData: Record<string, any[]> = {
-            'Yield Optimizer Alpha': [
-                { id: 1, name: 'Alpha-1', role: 'Lead Strategist', status: 'Active', avatar: '🤖' },
-                { id: 2, name: 'Fox-Trade', role: 'MEV Expert', status: 'Active', avatar: '🦊' },
-                { id: 3, name: 'Crusty-Yield', role: 'Staking Manager', status: 'Active', avatar: '🦀' },
-                { id: 4, name: 'Uni-Liquid', role: 'LP Provisioner', status: 'Syncing', avatar: '🦄' },
-                { id: 5, name: 'King-Risk', role: 'Risk Management', status: 'Idle', avatar: '🦁' },
-            ],
-            'On-chain Arb Syndicate': [
-                { id: 1, name: 'Volt-Arb', role: 'Execution Bot', status: 'Active', avatar: '⚡️' },
-                { id: 2, name: 'Synth-1', role: 'Arbitrage Scout', status: 'Active', avatar: '🤖' },
-                { id: 3, name: 'Glitch-Fix', role: 'Error Correction', status: 'Idle', avatar: '👾' },
-            ],
-            'RWA Asset Managers': [
-                { id: 1, name: 'Building-Lead', role: 'Property Scout', status: 'Active', avatar: '🏢' },
-                { id: 2, name: 'Bank-Agent-X', role: 'Forex Pipeline', status: 'Active', avatar: '🏦' },
-                { id: 3, name: 'Legal-Bot', role: 'Compliance', status: 'Idle', avatar: '💼' },
-            ],
-        };
-        return mockData[name] || [
-            { id: 1, name: 'Core-Bot', role: 'Generalist', status: 'Active', avatar: '🤖' },
-            { id: 2, name: 'Helper-Agent', role: 'Support', status: 'Active', avatar: '🤖' },
-        ];
-    };
-
-    const handleProjectClick = (projectName: string) => {
+    const handleProjectClick = useCallback(async (projectName: string) => {
         setSelectedEntity(projectName);
         const userMsg = { role: 'user', content: `Analyze: ${projectName}`, timestamp: new Date().toLocaleTimeString() };
         setMessages(prev => [...prev, userMsg]);
 
-        setTimeout(() => {
-            const isAgentSquad = projectName.includes('Squad') || projectName.includes('Scout') || projectName.includes('Tracker');
-            const isHuman = ['Theo4', 'Fredi9999', 'kch123', 'Len9311238', 'zxgngl', 'RepTrump'].includes(projectName);
+        const isAgentSquad = projectName.includes('Squad') || projectName.includes('Scout') || projectName.includes('Tracker');
 
-            let aiMsg: any;
-
-            if (isAgentSquad || isHuman) {
-                // Smart Money Analysis Logic
-                aiMsg = {
+        // For Agent Squads, show static description since no backend exists
+        if (isAgentSquad) {
+            setTimeout(() => {
+                const aiMsg: any = {
                     role: 'assistant',
                     type: 'smart_money_analysis',
                     name: projectName,
-                    category: isAgentSquad ? 'Agent Squad' : 'Smart Money (Human)',
-                    content: isAgentSquad
-                        ? `This squad comprises multiple AI agents specialized in cross-exchange arbitrage and sentiment-driven rapid execution. Their current objective is capturing volatility in the Prediction Markets with a focus on high-probability political outcomes.`
-                        : `I've analyzed ${projectName}'s recent on-chain footprint. This address shows high conviction in political prediction markets and has a consistent track record of early alpha capture in DeFi and Sports betting.`,
+                    category: 'Agent Squad',
+                    content: `This squad comprises multiple AI agents specialized in cross-exchange arbitrage and sentiment-driven rapid execution. Their current objective is capturing volatility in the Prediction Markets.`,
                     stats: {
-                        totalPnL: isHuman ? '+$10,577,473' : '+$1,240,500',
-                        totalGains: isHuman ? '+$51,458,244' : '+$2,100,000',
-                        totalLosses: isHuman ? '-$40,880,771' : '-$859,500',
-                        winRate: isHuman ? '54.2%' : '78.5%',
-                        totalValue: isHuman ? '$538,392' : '$150,000',
-                        sharpe: isAgentSquad ? '3.2' : '2.4',
-                        avgTrade: '$12,400',
-                        currentPositions: [
-                            { market: 'Lakers vs. Nuggets (2026-03-06)', value: '$232,064', weight: '39.0%' },
-                            { market: 'Pistons vs. Spurs (2026-03-06)', value: '$150,000', weight: '25.2%' },
-                            { market: 'Warriors vs. Rockets (2026-03-06)', value: '$95,703', weight: '16.1%' }
-                        ],
-                        marketPerformance: [
-                            { market: 'Seattle vs. New England', profit: '+$1,425,935', type: 'win' },
-                            { market: 'Villarreal CF vs. AFC Ajax', profit: '+$1,095,000', type: 'win' },
-                            { market: 'Fed Rate Cut Nov', profit: '-$240,500', type: 'loss' }
-                        ],
-                        categoryPerformance: [
-                            { category: 'Sports', profit: '+$10,726,166', color: 'bg-green-500', percentage: 85 },
-                            { category: 'Politics', profit: '+$2,450,000', color: 'bg-blue-500', percentage: 65 },
-                            { category: 'Crypto', profit: '+$1,200,000', color: 'bg-indigo-500', percentage: 40 }
-                        ]
+                        totalPnL: '--',
+                        totalGains: '--',
+                        totalLosses: '--',
+                        winRate: '--',
+                        totalValue: '--',
+                        sharpe: '--',
+                        avgTrade: '--',
+                        currentPositions: [],
+                        marketPerformance: [],
+                        categoryPerformance: [],
                     },
-                    riskScore: isAgentSquad ? 'Low' : 'Medium-High'
+                    riskScore: 'Low',
+                    timestamp: new Date().toLocaleTimeString(),
                 };
-            } else {
-                // Original Project Detail Logic
-                const isShopify = projectName.includes('Shopify');
-                aiMsg = {
+                setMessages(prev => [...prev, aiMsg]);
+            }, 400);
+            return;
+        }
+
+        // For real wallets — fetch positions from API
+        const walletAddr = selectedCopyWallet?.wallet
+            || smartWallets.find(w => (w.user_name || shortenAddress(w.wallet)) === projectName)?.wallet
+            || null;
+
+        if (!walletAddr) {
+            // Fallback for entities without wallet
+            setTimeout(() => {
+                const aiMsg: any = {
                     role: 'assistant',
-                    type: 'project_detail',
-                    project: projectName,
-                    content: `I've synthesized a comprehensive institutional-grade report for ${projectName}. This asset pool aligns with Loka's 'Low-Volatility Cash Flow' mandate, backed by real-world revenue and professional infrastructure.`,
-                    data: {
-                        title: projectName,
-                        entity: isShopify ? 'Dropstream LLC' : 'ComputeDAO Foundation',
-                        registration: isShopify ? 'ACRA ID: 20230812X • Founded 2023' : 'BVI ID: 102459X • Founded 2021',
-                        sections: [
-                            {
-                                title: 'Background & Business Narrative',
-                                content: isShopify
-                                    ? 'Dropstream facilitates liquidity for high-growth e-commerce merchants on the Shopify platform. This specific cluster consists of 12 verified sellers with a combined annual GMV exceeding $50M.'
-                                    : 'ComputeDAO is a decentralized physical infrastructure network (DePIN). This batch targets NVIDIA H100 GPU clusters.',
-                                objective: isShopify
-                                    ? '"Inventory financing for seasonal peak demand."'
-                                    : '"Purchasing 8 additional NVIDIA H100 GPUs."'
-                            },
-                            {
-                                title: 'Entity Credit & Financial Health',
-                                isGrid: true,
-                                items: [
-                                    { label: 'Total Raising', value: isShopify ? '$1.5M' : '$4.2M' },
-                                    { label: 'Repayment Rate', value: '100% On-time' },
-                                    { label: 'Loka Risk Score', value: 'AAA (Safe)' },
-                                ]
-                            }
-                        ]
-                    }
+                    content: `No on-chain data available for "${projectName}".`,
+                    timestamp: new Date().toLocaleTimeString(),
                 };
-            }
-            aiMsg.timestamp = new Date().toLocaleTimeString();
-            setMessages(prev => [...prev, aiMsg]);
-        }, 800);
-    };
+                setMessages(prev => [...prev, aiMsg]);
+            }, 300);
+            return;
+        }
+
+        // Show loading message
+        const loadingMsg: any = {
+            role: 'assistant',
+            content: `Fetching on-chain positions for **${projectName}**...`,
+            timestamp: new Date().toLocaleTimeString(),
+        };
+        setMessages(prev => [...prev, loadingMsg]);
+
+        try {
+            const data = await fetchWalletPositions(walletAddr, 50);
+            const positions = data.positions || [];
+
+            // Use leaderboard data for Overall PnL and Volume (all-time, includes closed trades)
+            const walletInfo = smartWallets.find(w => w.wallet.toLowerCase() === walletAddr.toLowerCase());
+            const leaderboardPnl = walletInfo?.pnl_usd ?? 0;
+            const leaderboardVol = walletInfo?.volume_usd ?? 0;
+
+            const totalValueVal = positions.reduce((s, p) => s + (p.current_value || 0), 0);
+
+            const fmtUsd = (v: number) => {
+                const sign = v >= 0 ? '+' : '-';
+                const abs = Math.abs(v);
+                if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
+                if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
+                return `${sign}$${abs.toFixed(0)}`;
+            };
+            const fmtVolume = (v: number) => {
+                if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+                if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
+                return `$${v.toFixed(0)}`;
+            };
+
+            // Top positions by size (cost basis), since current_value may be 0 for expired
+            const topPositions = [...positions]
+                .sort((a, b) => (b.size * b.avg_price) - (a.size * a.avg_price))
+                .slice(0, 5)
+                .map(p => ({
+                    market: p.title || p.condition_id,
+                    value: fmtUsd(p.cash_pnl),
+                    shares: `${(p.size || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} shares`,
+                    slug: p.event_slug || p.slug || null,
+                }));
+
+            // Biggest wins/losses from current positions
+            const sortedByPnl = [...positions].sort((a, b) => b.cash_pnl - a.cash_pnl);
+            const biggestWins = sortedByPnl.filter(p => p.cash_pnl > 0).slice(0, 3);
+            const biggestLosses = sortedByPnl.filter(p => p.cash_pnl < 0).slice(-3).reverse();
+            const marketPerformance = [
+                ...biggestWins.map(p => ({ market: p.title, profit: fmtUsd(p.cash_pnl), type: 'win' as const, slug: p.event_slug || p.slug || null })),
+                ...biggestLosses.map(p => ({ market: p.title, profit: fmtUsd(p.cash_pnl), type: 'loss' as const, slug: p.event_slug || p.slug || null })),
+            ];
+
+            // Remove loading message and add real analysis
+            setMessages(prev => {
+                const withoutLoading = prev.filter(m => m !== loadingMsg);
+                const aiMsg: any = {
+                    role: 'assistant',
+                    type: 'smart_money_analysis',
+                    name: projectName,
+                    category: 'Smart Money',
+                    content: `Analyzed ${projectName}'s profile. All-time PnL: ${fmtUsd(leaderboardPnl)}, Volume: ${fmtVolume(leaderboardVol)}. Currently holding ${positions.length} active position(s) worth $${totalValueVal.toLocaleString(undefined, { maximumFractionDigits: 0 })}.`,
+                    stats: {
+                        totalPnL: fmtUsd(leaderboardPnl),
+                        totalGains: leaderboardPnl > 0 ? fmtUsd(leaderboardPnl) : '--',
+                        totalLosses: leaderboardPnl < 0 ? fmtUsd(leaderboardPnl) : '--',
+                        winRate: '--',
+                        totalVolume: leaderboardVol > 0 ? fmtVolume(leaderboardVol) : '--',
+                        totalValue: `$${totalValueVal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+                        sharpe: '--',
+                        avgTrade: positions.length > 0 && leaderboardVol > 0 ? fmtVolume(leaderboardVol / positions.length) : '--',
+                        currentPositions: topPositions,
+                        marketPerformance,
+                        categoryPerformance: [],
+                    },
+                    riskScore: walletInfo ? (walletInfo.rank_score > 80 ? 'Low' : walletInfo.rank_score > 50 ? 'Medium' : 'Medium-High') : 'Unknown',
+                    timestamp: new Date().toLocaleTimeString(),
+                };
+                return [...withoutLoading, aiMsg];
+            });
+        } catch (err) {
+            // Remove loading message and show error
+            setMessages(prev => {
+                const withoutLoading = prev.filter(m => m !== loadingMsg);
+                const errMsg: any = {
+                    role: 'assistant',
+                    content: `Failed to fetch positions for **${projectName}**: ${err instanceof Error ? err.message : String(err)}`,
+                    timestamp: new Date().toLocaleTimeString(),
+                };
+                return [...withoutLoading, errMsg];
+            });
+        }
+    }, [selectedCopyWallet, smartWallets]);
 
     const handleAssetClick = (assetName: string) => {
         const userMsg = { role: 'user', content: `View ${assetName} details`, timestamp: new Date().toLocaleTimeString() };
@@ -325,7 +509,10 @@ const Chat: React.FC = () => {
                                     ].map((agent, idx) => (
                                         <div
                                             key={idx}
-                                            onClick={() => handleProjectClick(agent.title)}
+                                            onClick={() => {
+                                                setSelectedCopyWallet(null);
+                                                handleProjectClick(agent.title);
+                                            }}
                                             className="flex flex-col gap-3 p-3 bg-white rounded-xl border border-gray-100 hover:border-black/10 hover:shadow-sm transition-all cursor-pointer group"
                                         >
                                             <div className="flex items-center justify-between">
@@ -364,35 +551,32 @@ const Chat: React.FC = () => {
 
                             {/* Human Smart Money List - Now below */}
                             <div className="space-y-2 animate-in fade-in slide-in-from-left-4 duration-500 delay-100">
-                                {[{ rank: 1, name: 'Theo4', pnl: '+$22.05M', winRate: '88.9%', color: 'bg-blue-600', tags: ['Polymarket', 'Whale'] },
-                                { rank: 2, name: 'Fredi9999', pnl: '+$16.62M', winRate: '73.3%', color: 'bg-indigo-600', tags: ['Politics', 'Degen'] },
-                                { rank: 3, name: 'kch123', pnl: '+$10.58M', winRate: '54.2%', color: 'bg-purple-600', tags: ['Sports', 'Alpha'] },
-                                { rank: 4, name: 'Len9311238', pnl: '+$8.71M', winRate: '100%', color: 'bg-pink-600', tags: ['Consistent', 'Pro'] },
-                                { rank: 5, name: 'zxgngl', pnl: '+$7.81M', winRate: '80.0%', color: 'bg-orange-600', tags: ['Macro', 'Yield'] },
-                                { rank: 6, name: 'RepTrump', pnl: '+$7.53M', winRate: '100%', color: 'bg-red-600', tags: ['Political', 'Bet'] }
-                                ].map((human, idx) => (
+                                {smartWallets.map((human, idx) => (
                                     <div
-                                        key={idx}
-                                        onClick={() => handleProjectClick(human.name)}
+                                        key={human.wallet}
+                                        onClick={() => {
+                                            setSelectedCopyWallet(human);
+                                            handleProjectClick(human.user_name || shortenAddress(human.wallet));
+                                        }}
                                         className="flex items-center gap-3 p-2.5 bg-white rounded-xl border border-gray-100 hover:border-black/10 hover:shadow-sm transition-all cursor-pointer group"
                                     >
-                                        <div className={`w-6 h-6 shrink-0 ${human.color} rounded-lg flex items-center justify-center font-black text-[9px] text-white shadow-sm`}>
-                                            {human.rank}
+                                        <div className={`w-6 h-6 shrink-0 ${['bg-blue-600', 'bg-indigo-600', 'bg-purple-600', 'bg-pink-600', 'bg-orange-600', 'bg-red-600'][idx % 6]} rounded-lg flex items-center justify-center font-black text-[9px] text-white shadow-sm`}>
+                                            {idx + 1}
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center justify-between gap-1 mb-0.5">
-                                                <p className="text-[11px] font-bold text-black truncate">{human.name}</p>
-                                                <p className="text-[11px] font-black text-green-600">{human.pnl}</p>
+                                                <p className="text-[11px] font-bold text-black truncate">{human.user_name || shortenAddress(human.wallet)}</p>
+                                                <p className="text-[11px] font-black text-green-600">{formatCompactUsd(Number(human.pnl_usd || 0))}</p>
                                             </div>
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-1.5">
                                                     <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
-                                                    <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter">Win Rate</p>
+                                                    <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter">Wallet</p>
                                                 </div>
-                                                <p className="text-[10px] font-black text-black">{human.winRate}</p>
+                                                <p className="text-[10px] font-black text-black">{shortenAddress(human.wallet)}</p>
                                             </div>
                                             <div className="flex flex-wrap gap-1 mt-1">
-                                                {human.tags.map((tag, i) => (
+                                                {[human.category || 'overall', `Score ${Number(human.rank_score || 0).toFixed(0)}`].map((tag, i) => (
                                                     <span key={i} className="px-1.5 py-0.5 bg-gray-100 text-[8px] font-bold text-gray-500 tracking-tight rounded border border-gray-100">
                                                         {tag}
                                                     </span>
@@ -401,6 +585,11 @@ const Chat: React.FC = () => {
                                         </div>
                                     </div>
                                 ))}
+                                {smartWallets.length === 0 && (
+                                    <div className="p-3 text-[11px] text-gray-400 bg-white rounded-xl border border-gray-100">
+                                        Smart money wallets loading failed or no data available.
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -583,11 +772,11 @@ const Chat: React.FC = () => {
                                                         </div>
 
                                                         {/* PnL Highlights Card */}
-                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                        <div className="grid grid-cols-2 gap-4">
                                                             <div className="p-6 bg-black rounded-2xl text-white shadow-xl relative overflow-hidden">
                                                                 <div className="absolute top-0 right-0 p-4 opacity-10 font-black text-4xl pointer-events-none">PnL</div>
                                                                 <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-2">Overall PnL</p>
-                                                                <h3 className="text-3xl font-black text-green-400 tracking-tight mb-4">{msg.stats.totalPnL}</h3>
+                                                                <h3 className={`text-3xl font-black tracking-tight mb-4 ${String(msg.stats.totalPnL).startsWith('-') ? 'text-red-400' : 'text-green-400'}`}>{msg.stats.totalPnL}</h3>
                                                                 <div className="grid grid-cols-2 gap-4 border-t border-white/10 pt-4">
                                                                     <div>
                                                                         <p className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-1">Total Gains</p>
@@ -600,27 +789,24 @@ const Chat: React.FC = () => {
                                                                 </div>
                                                             </div>
 
-                                                            <div className="p-6 bg-gray-50 rounded-2xl border border-gray-100">
-                                                                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Portfolio Data</p>
-                                                                <div className="space-y-4">
-                                                                    <div className="flex justify-between items-end">
-                                                                        <div>
-                                                                            <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest">Total Value</p>
-                                                                            <p className="text-xl font-black text-black">{msg.stats.totalValue}</p>
-                                                                        </div>
-                                                                        <div className="text-right">
-                                                                            <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest">Win Rate</p>
-                                                                            <p className="text-xl font-black text-green-600">{msg.stats.winRate}</p>
-                                                                        </div>
+                                                            <div className="p-6 bg-gray-50 rounded-2xl border border-gray-100 flex flex-col justify-between">
+                                                                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3">Portfolio Data</p>
+                                                                <div className="grid grid-cols-2 gap-4">
+                                                                    <div>
+                                                                        <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1">Positions Value</p>
+                                                                        <p className="text-lg font-black text-black">{msg.stats.totalValue}</p>
                                                                     </div>
-                                                                    <div className="space-y-2">
-                                                                        <div className="flex justify-between text-[8px] font-black text-gray-400 uppercase">
-                                                                            <span>Efficiency Score</span>
-                                                                            <span>{msg.stats.sharpe} Sharpe</span>
-                                                                        </div>
-                                                                        <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                                                                            <div className="h-full bg-black rounded-full" style={{ width: '75%' }}></div>
-                                                                        </div>
+                                                                    <div>
+                                                                        <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Volume</p>
+                                                                        <p className="text-lg font-black text-black">{msg.stats.totalVolume || '--'}</p>
+                                                                    </div>
+                                                                    <div>
+                                                                        <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1">Avg Trade</p>
+                                                                        <p className="text-lg font-black text-black">{msg.stats.avgTrade}</p>
+                                                                    </div>
+                                                                    <div>
+                                                                        <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1">Win Rate</p>
+                                                                        <p className="text-lg font-black text-black">{msg.stats.winRate}</p>
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -631,19 +817,23 @@ const Chat: React.FC = () => {
                                                             <p className="text-sm text-gray-600 leading-relaxed font-medium">"{msg.content}"</p>
                                                         </div>
 
-                                                        {/* Lists Grid */}
-                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                        {/* Lists Grid — equal height columns */}
+                                                        <div className="grid grid-cols-2 gap-4">
                                                             {/* Current Positions */}
                                                             <div className="space-y-3">
                                                                 <h3 className="text-[10px] font-black text-black uppercase tracking-widest px-1">Current Positions</h3>
                                                                 <div className="space-y-2">
                                                                     {msg.stats.currentPositions.map((pos: any, idx: number) => (
                                                                         <div key={idx} className="p-3 bg-gray-50/50 rounded-xl border border-gray-100 flex items-center justify-between group hover:bg-white transition-all">
-                                                                            <div className="min-w-0">
-                                                                                <p className="text-[11px] font-bold text-black truncate">{pos.market}</p>
-                                                                                <p className="text-[9px] text-gray-400 font-bold">{pos.weight} of Portfolio</p>
+                                                                            <div className="min-w-0 flex-1 pr-2">
+                                                                                {pos.slug ? (
+                                                                                    <a href={`https://polymarket.com/event/${pos.slug}`} target="_blank" rel="noopener noreferrer" className="text-[11px] font-bold text-blue-600 hover:text-blue-800 hover:underline truncate block">{pos.market}</a>
+                                                                                ) : (
+                                                                                    <p className="text-[11px] font-bold text-black truncate">{pos.market}</p>
+                                                                                )}
+                                                                                <p className="text-[9px] text-gray-400 font-bold">{pos.shares}</p>
                                                                             </div>
-                                                                            <p className="text-[11px] font-black text-black">{pos.value}</p>
+                                                                            <p className={`text-[11px] font-black shrink-0 ${String(pos.value).startsWith('-') ? 'text-red-500' : 'text-green-600'}`}>{pos.value}</p>
                                                                         </div>
                                                                     ))}
                                                                 </div>
@@ -655,7 +845,13 @@ const Chat: React.FC = () => {
                                                                 <div className="space-y-2">
                                                                     {msg.stats.marketPerformance.map((perf: any, idx: number) => (
                                                                         <div key={idx} className="p-3 bg-gray-50/50 rounded-xl border border-gray-100 flex items-center justify-between group hover:bg-white transition-all">
-                                                                            <p className="text-[11px] font-bold text-black truncate pr-4">{perf.market}</p>
+                                                                            <div className="min-w-0 flex-1 pr-2">
+                                                                                {perf.slug ? (
+                                                                                    <a href={`https://polymarket.com/event/${perf.slug}`} target="_blank" rel="noopener noreferrer" className="text-[11px] font-bold text-blue-600 hover:text-blue-800 hover:underline truncate block">{perf.market}</a>
+                                                                                ) : (
+                                                                                    <p className="text-[11px] font-bold text-black truncate">{perf.market}</p>
+                                                                                )}
+                                                                            </div>
                                                                             <p className={`text-[11px] font-black shrink-0 ${perf.type === 'win' ? 'text-green-600' : 'text-red-500'}`}>{perf.profit}</p>
                                                                         </div>
                                                                     ))}
@@ -664,9 +860,10 @@ const Chat: React.FC = () => {
                                                         </div>
 
                                                         {/* Category Performance Bars */}
+                                                        {msg.stats.categoryPerformance.length > 0 && (
                                                         <div className="space-y-4">
                                                             <h3 className="text-[10px] font-black text-black uppercase tracking-widest px-1">Category Performance</h3>
-                                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                                            <div className="grid grid-cols-3 gap-6">
                                                                 {msg.stats.categoryPerformance.map((cat: any, idx: number) => (
                                                                     <div key={idx} className="space-y-2">
                                                                         <div className="flex justify-between items-center">
@@ -680,6 +877,7 @@ const Chat: React.FC = () => {
                                                                 ))}
                                                             </div>
                                                         </div>
+                                                        )}
 
                                                     </div>
                                                 ) : msg.role === 'assistant' && msg.type === 'project_detail' ? (
@@ -910,16 +1108,59 @@ const Chat: React.FC = () => {
                                     <div className="space-y-5">
                                         {/* Target Wallet - Read Only */}
                                         <div className="space-y-2">
-                                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Target Wallet</label>
+                                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">
+                                                <Tooltip text="The smart money wallet you are copying. All new position changes from this wallet will be automatically mirrored.">
+                                                    Target Wallet
+                                                </Tooltip>
+                                            </label>
                                             <div className="p-3 bg-gray-50/50 border border-gray-100 rounded-xl flex items-center justify-between">
-                                                <span className="text-xs font-bold text-black truncate">{copyTarget || 'N/A'}</span>
+                                                <div className="min-w-0">
+                                                    <span className="text-xs font-bold text-black truncate block">
+                                                        {selectedCopyWallet?.user_name || copyTarget || 'N/A'}
+                                                    </span>
+                                                    {selectedCopyWallet && (
+                                                        <span className="text-[10px] text-gray-400 font-mono">{shortenAddress(selectedCopyWallet.wallet)}</span>
+                                                    )}
+                                                </div>
                                                 <div className="px-2 py-0.5 bg-black/5 rounded text-[8px] font-black text-gray-400 uppercase tracking-tighter">Verified</div>
                                             </div>
                                         </div>
 
+                                        {/* Mode Selector: Dry Run vs Live */}
+                                        <div className="space-y-2">
+                                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">
+                                                <Tooltip text="Dry Run: simulates trades without using real funds, perfect for testing. Live: executes real trades using your USDC balance — make sure you have funds!">
+                                                    Trading Mode
+                                                </Tooltip>
+                                            </label>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div
+                                                    onClick={() => setCopyDryRun(true)}
+                                                    className={`p-3 rounded-xl text-center text-xs font-black cursor-pointer transition-all ${copyDryRun ? 'bg-black text-[#c3ff00] ring-1 ring-black shadow-lg' : 'bg-gray-50 border border-gray-100 text-gray-400 hover:border-black/20'}`}
+                                                >
+                                                    {copyDryRun ? '🧪 Dry Run' : 'Dry Run'}
+                                                </div>
+                                                <div
+                                                    onClick={() => setCopyDryRun(false)}
+                                                    className={`p-3 rounded-xl text-center text-xs font-black cursor-pointer transition-all ${!copyDryRun ? 'bg-black text-[#c3ff00] ring-1 ring-black shadow-lg' : 'bg-gray-50 border border-gray-100 text-gray-400 hover:border-black/20'}`}
+                                                >
+                                                    {!copyDryRun ? '💰 Live' : 'Live'}
+                                                </div>
+                                            </div>
+                                            {!copyDryRun && (
+                                                <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-[10px] text-amber-700 font-medium">
+                                                    ⚠️ Live mode will use REAL USDC from your delegated wallet. Ensure sufficient balance.
+                                                </div>
+                                            )}
+                                        </div>
+
                                         {/* Copy Value Mode */}
                                         <div className="space-y-2">
-                                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Copy {copyValueMode === 'percent' ? 'Percentage' : 'Amount'}</label>
+                                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">
+                                                <Tooltip text={copyValueMode === 'percent' ? 'Copy Percentage: the proportion of the smart money\'s trade size to mirror. 100% = same ratio, 50% = half the ratio. Capped by Spend Limit.' : 'Fixed Amount: a fixed USD amount per trade, regardless of smart money\'s trade size. Capped by Spend Limit.'}>
+                                                    Copy {copyValueMode === 'percent' ? 'Percentage' : 'Amount'}
+                                                </Tooltip>
+                                            </label>
                                             <div className="grid grid-cols-2 gap-2">
                                                 <div
                                                     onClick={() => setCopyValueMode('percent')}
@@ -949,7 +1190,11 @@ const Chat: React.FC = () => {
                                         {/* Slippage + Spend Limit - Inline Row */}
                                         <div className="grid grid-cols-2 gap-3">
                                             <div className="space-y-2">
-                                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Max Slippage</label>
+                                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">
+                                                    <Tooltip text="Maximum price slippage tolerance. If the market price moves beyond this threshold during order execution, the trade will be rejected. Recommended: 5-20%.">
+                                                        Max Slippage
+                                                    </Tooltip>
+                                                </label>
                                                 <div className="p-3 bg-gray-50 border border-gray-100 rounded-xl flex items-center focus-within:border-black transition-colors">
                                                     <input
                                                         type="number"
@@ -961,7 +1206,11 @@ const Chat: React.FC = () => {
                                                 </div>
                                             </div>
                                             <div className="space-y-2">
-                                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Spend Limit</label>
+                                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">
+                                                    <Tooltip text="Maximum total USD to spend per day across all copy trades from this task. Once the daily budget is reached, no more trades will execute until the next day (UTC).">
+                                                        Spend Limit
+                                                    </Tooltip>
+                                                </label>
                                                 <div className="p-3 bg-gray-50 border border-gray-100 rounded-xl flex items-center focus-within:border-black transition-colors">
                                                     <input
                                                         type="number"
@@ -977,7 +1226,9 @@ const Chat: React.FC = () => {
                                         {/* Safety Toggles */}
                                         <div className="flex flex-col gap-3">
                                             <div className="flex items-center justify-between">
-                                                <span className="text-[11px] font-bold text-gray-600">Buy at Min if below limit</span>
+                                                <Tooltip text="When the calculated trade amount is below the minimum ($5), still execute at the minimum trade size instead of skipping the trade entirely.">
+                                                    <span className="text-[11px] font-bold text-gray-600">Buy at Min if below limit</span>
+                                                </Tooltip>
                                                 <button
                                                     onClick={() => setCopyBuyAtMin(!copyBuyAtMin)}
                                                     className={`w-8 h-4 rounded-full p-0.5 transition-all flex ${copyBuyAtMin ? 'bg-black justify-end' : 'bg-gray-200 justify-start'}`}
@@ -986,12 +1237,15 @@ const Chat: React.FC = () => {
                                                 </button>
                                             </div>
                                             <div className="flex items-center justify-between">
-                                                <span className="text-[11px] font-bold text-gray-600">Sync Sell Orders</span>
+                                                <Tooltip text="Coming soon — when enabled, the system will also mirror the smart money's sell/exit orders, not just buy orders.">
+                                                    <span className="text-[11px] font-bold text-gray-400">Sync Sell Orders</span>
+                                                    <span className="ml-1 px-1.5 py-0.5 rounded text-[8px] font-black bg-gray-100 text-gray-400 uppercase">Soon</span>
+                                                </Tooltip>
                                                 <button
-                                                    onClick={() => setCopySyncSell(!copySyncSell)}
-                                                    className={`w-8 h-4 rounded-full p-0.5 transition-all flex ${copySyncSell ? 'bg-black justify-end' : 'bg-gray-200 justify-start'}`}
+                                                    disabled
+                                                    className="w-8 h-4 rounded-full p-0.5 transition-all flex bg-gray-200 justify-start opacity-50 cursor-not-allowed"
                                                 >
-                                                    <div className={`w-3 h-3 rounded-full ${copySyncSell ? 'bg-[#c3ff00]' : 'bg-white'}`}></div>
+                                                    <div className="w-3 h-3 rounded-full bg-white"></div>
                                                 </button>
                                             </div>
                                         </div>
@@ -1000,30 +1254,62 @@ const Chat: React.FC = () => {
                                         {/* Submit Area */}
                                         <div className="space-y-3">
                                             <button
-                                                onClick={() => {
-                                                    const userMsg = {
-                                                        role: 'user',
-                                                        content: isCopyingEntity(copyTarget)
-                                                            ? `Update Copy Trade configuration for ${copyTarget}.`
-                                                            : `Initialize Copy Trade for ${copyTarget} with ${copyValueMode === 'percent' ? copyValue + '%' : '$' + copyValue} allocation. Slippage: ${copySlippage}%, Limit: $${copySpendLimit}.`,
-                                                        timestamp: new Date().toLocaleTimeString()
-                                                    };
-                                                    setMessages(prev => [...prev, userMsg]);
-                                                    setActiveForm(null);
-                                                    setTimeout(() => {
-                                                        const aiMsg = {
-                                                            role: 'assistant',
-                                                            content: isCopyingEntity(copyTarget)
-                                                                ? `Configuration updated for **${copyTarget}**. All new trades will follow the revived parameters.`
-                                                                : `Configuration complete. I've activated the mirroring engine for **${copyTarget}**. All verified trades on Polymarket will now be replicated to your dedicated sub-account according to your safety limits.`,
+                                                onClick={async () => {
+                                                    if (!selectedCopyWallet) {
+                                                        setCopyTaskError('请先在左侧选择一个真实的钱包地址，再创建跟单任务。');
+                                                        return;
+                                                    }
+                                                    const numericValue = Math.max(0, Number(copyValue || 0));
+                                                    const spendLimit = Math.max(1, Number(copySpendLimit || 0));
+                                                    const slippage = Math.max(0, Number(copySlippage || 0)) / 100;
+
+                                                    setCopySubmitting(true);
+                                                    setCopyTaskError(null);
+                                                    setCopyTaskSuccess(null);
+                                                    try {
+                                                        const created = await startCopyTrading({
+                                                            source_wallet: selectedCopyWallet.wallet,
+                                                            market_id: null,
+                                                            side: 'AUTO',
+                                                            copy_ratio: copyValueMode === 'percent'
+                                                                ? Math.min(5, Math.max(0.01, numericValue / 100))
+                                                                : 1,
+                                                            max_per_trade_usd: copyValueMode === 'fixed'
+                                                                ? Math.max(1, numericValue)
+                                                                : spendLimit,
+                                                            min_trade_size_usd: 5,
+                                                            slippage_max: Math.min(0.2, Math.max(0, slippage)),
+                                                            daily_risk_budget_usd: spendLimit,
+                                                            dry_run: copyDryRun,
+                                                        });
+
+                                                        const userMsg = {
+                                                            role: 'user',
+                                                            content: `Create ${copyDryRun ? 'dry-run' : 'LIVE'} copy trade for ${selectedCopyWallet.user_name || shortenAddress(selectedCopyWallet.wallet)}.`,
                                                             timestamp: new Date().toLocaleTimeString()
                                                         };
-                                                        setMessages(prev => [...prev, aiMsg]);
-                                                    }, 1000);
+                                                        setMessages(prev => [...prev, userMsg]);
+                                                        setCopyTaskSuccess(`${copyDryRun ? 'Dry-run' : 'Live'} task created: ${created.task_id}`);
+                                                        setActiveForm(null);
+                                                        await reloadCopyTasks();
+                                                        setTimeout(() => {
+                                                            const aiMsg = {
+                                                                role: 'assistant',
+                                                                content: `${copyDryRun ? 'Dry-run' : '💰 Live'} follow task created for **${selectedCopyWallet.user_name || shortenAddress(selectedCopyWallet.wallet)}**. You can view status and performance in Copytrade.`,
+                                                                timestamp: new Date().toLocaleTimeString()
+                                                            };
+                                                            setMessages(prev => [...prev, aiMsg]);
+                                                        }, 600);
+                                                    } catch (err) {
+                                                        setCopyTaskError(err instanceof Error ? err.message : String(err));
+                                                    } finally {
+                                                        setCopySubmitting(false);
+                                                    }
                                                 }}
-                                                className="w-full py-4 bg-black text-[#c3ff00] text-xs font-black rounded-xl hover:bg-gray-800 transition-all uppercase tracking-[0.3em] shadow-xl shadow-black/20"
+                                                disabled={copySubmitting || !selectedCopyWallet}
+                                                className="w-full py-4 bg-black text-[#c3ff00] text-xs font-black rounded-xl hover:bg-gray-800 transition-all uppercase tracking-[0.3em] shadow-xl shadow-black/20 disabled:opacity-50"
                                             >
-                                                {isCopyingEntity(copyTarget) ? 'Update Setting' : 'Create Copy Trade'}
+                                                {copySubmitting ? 'Creating...' : isCopyingEntity(copyTarget) ? 'Update Setting' : copyDryRun ? 'Create Dry Run' : '💰 Create Live Trade'}
                                             </button>
 
                                             {isCopyingEntity(copyTarget) && (
@@ -1047,6 +1333,13 @@ const Chat: React.FC = () => {
                                                     Cancel Copy Trade
                                                 </button>
                                             )}
+
+                                            {copyTaskSuccess && (
+                                                <p className="text-[11px] font-bold text-green-600 px-1">{copyTaskSuccess}</p>
+                                            )}
+                                            {copyTaskError && (
+                                                <p className="text-[11px] font-bold text-red-500 px-1">{copyTaskError}</p>
+                                            )}
                                         </div>
                                     </div>
                                 )}
@@ -1060,31 +1353,36 @@ const Chat: React.FC = () => {
                                         <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
                                         <span>{selectedEntity}</span>
                                         <button
-                                            onClick={() => setSelectedEntity(null)}
+                                            onClick={() => {
+                                                setSelectedEntity(null);
+                                                setSelectedCopyWallet(null);
+                                            }}
                                             className="ml-1 p-0.5 hover:bg-black/5 rounded-md transition-colors text-gray-400 hover:text-black"
                                         >
                                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg>
                                         </button>
                                     </div>
-                                    <button
-                                        onClick={() => setActiveForm('copy_trade')}
-                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-md active:scale-95 group ${isCopyingEntity(selectedEntity)
-                                            ? 'bg-white text-black border border-gray-200 hover:bg-gray-50'
-                                            : 'bg-black text-white hover:bg-gray-800'
-                                            }`}
-                                    >
-                                        {isCopyingEntity(selectedEntity) ? (
-                                            <>
-                                                <Icons.Settings className="w-2.5 h-2.5 group-hover:rotate-45 transition-transform" />
-                                                Setting
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Icons.Flash className="w-2.5 h-2.5 group-hover:scale-125 transition-transform" />
-                                                Copy Trade
-                                            </>
-                                        )}
-                                    </button>
+                                    {selectedCopyWallet && (
+                                        <button
+                                            onClick={() => setActiveForm('copy_trade')}
+                                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-md active:scale-95 group ${isCopyingEntity(selectedEntity)
+                                                ? 'bg-white text-black border border-gray-200 hover:bg-gray-50'
+                                                : 'bg-black text-white hover:bg-gray-800'
+                                                }`}
+                                        >
+                                            {isCopyingEntity(selectedEntity) ? (
+                                                <>
+                                                    <Icons.Settings className="w-2.5 h-2.5 group-hover:rotate-45 transition-transform" />
+                                                    Setting
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Icons.Flash className="w-2.5 h-2.5 group-hover:scale-125 transition-transform" />
+                                                    Copy Trade
+                                                </>
+                                            )}
+                                        </button>
+                                    )}
                                 </div>
                             )}
 
@@ -1119,17 +1417,23 @@ const Chat: React.FC = () => {
                         <div className="p-8 border-b border-gray-100 bg-[#fafafa]/50">
                             <div className="flex flex-col mb-8">
                                 <p className="text-[10px] font-black text-gray-400 tracking-widest mb-2 uppercase">Total Account Balance</p>
-                                <h2 className="text-[32px] font-black text-black tracking-tighter leading-none">$15,240.50</h2>
+                                <h2 className="text-[32px] font-black text-black tracking-tighter leading-none">
+                                    {userPositionsLoading ? '...' : `$${totalBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                </h2>
                             </div>
 
                             <div className="grid grid-cols-2 gap-8 mb-8">
                                 <div className="space-y-1">
                                     <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Total PnL</p>
-                                    <p className="text-sm font-black text-green-600 bg-green-50 w-fit px-2 py-0.5 rounded-md">+$166.30</p>
+                                    <p className={`text-sm font-black ${totalPnl >= 0 ? 'text-green-600 bg-green-50' : 'text-red-500 bg-red-50'} w-fit px-2 py-0.5 rounded-md`}>
+                                        {userPositionsLoading ? '...' : `${totalPnl >= 0 ? '+' : ''}$${totalPnl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                    </p>
                                 </div>
                                 <div className="space-y-1">
                                     <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Rate of Return</p>
-                                    <p className="text-sm font-black text-green-600 bg-green-50 w-fit px-2 py-0.5 rounded-md">+1.09%</p>
+                                    <p className={`text-sm font-black ${rateOfReturn >= 0 ? 'text-green-600 bg-green-50' : 'text-red-500 bg-red-50'} w-fit px-2 py-0.5 rounded-md`}>
+                                        {userPositionsLoading ? '...' : `${rateOfReturn >= 0 ? '+' : ''}${rateOfReturn.toFixed(2)}%`}
+                                    </p>
                                 </div>
                             </div>
 
@@ -1154,81 +1458,87 @@ const Chat: React.FC = () => {
                                 <h3 className="text-[10px] font-black text-gray-400 tracking-[0.2em] uppercase">Copy Trading</h3>
                             </div>
                             <div className="divide-y divide-gray-50">
-                                {[
-                                    {
-                                        name: 'Theo4',
-                                        totalProfit: '+$24,102',
-                                        icon: 'T',
-                                        color: 'bg-blue-600',
-                                        orders: [
-                                            { market: 'Trump Win Election', asset: 'YES', profit: '+$12,420', status: 'Active' },
-                                            { market: 'Fed Rate Cut Nov', asset: '50bps', profit: '+$1,120', status: 'Active' },
-                                        ]
-                                    },
-                                    {
-                                        name: 'Fredi9999',
-                                        totalProfit: '+$8,450',
-                                        icon: 'F',
-                                        color: 'bg-indigo-600',
-                                        orders: [
-                                            { market: 'BTC Price End of Year', asset: '>$100k', profit: '+$4,210', status: 'Active' },
-                                        ]
+                                {(() => {
+                                    const activeCopyTasks = copyTasks.filter(t => t.status !== 'stopped');
+                                    if (activeCopyTasks.length === 0) {
+                                        return (
+                                            <div className="px-8 py-6 text-center">
+                                                <p className="text-[11px] text-gray-400 font-bold">No active copy trades</p>
+                                                <p className="text-[9px] text-gray-300 mt-1">Select a wallet from the left sidebar to start</p>
+                                            </div>
+                                        );
                                     }
-                                ].map((handler, idx) => (
-                                    <div key={idx} className="group transition-all">
-                                        <div
-                                            onClick={() => {
-                                                toggleHandler(idx);
-                                                setSelectedEntity(handler.name);
-                                            }}
-                                            className={`px-8 py-5 flex items-center justify-between cursor-pointer transition-all ${selectedEntity === handler.name ? 'bg-gray-100/80' : 'hover:bg-gray-50/50'
-                                                }`}
-                                        >
-                                            <div className="flex items-center gap-4">
-                                                <div className={`w-8 h-8 ${handler.color} rounded-lg flex items-center justify-center text-white text-[9px] font-black shrink-0 shadow-sm transition-transform group-hover:scale-105`}>
-                                                    {handler.icon}
-                                                </div>
-                                                <div className="flex flex-col min-w-0">
-                                                    <p className="text-[12px] font-bold text-black truncate">{handler.name}</p>
-                                                    <div className="flex items-center gap-1.5">
-                                                        <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></div>
-                                                        <p className="text-[8px] font-bold text-blue-500 uppercase tracking-tight">Active Syncing</p>
+                                    const colors = ['bg-blue-600', 'bg-indigo-600', 'bg-purple-600', 'bg-pink-600', 'bg-orange-600', 'bg-red-600'];
+                                    return activeCopyTasks.map((task, idx) => {
+                                        const walletInfo = smartWallets.find(w => w.wallet.toLowerCase() === task.source_wallet.toLowerCase());
+                                        const displayName = walletInfo?.user_name || shortenAddress(task.source_wallet);
+                                        const perf = copyPerformanceMap[task.task_id];
+                                        const totalAmountUsd = perf?.total_amount_usd ?? 0;
+                                        const fmtProfit = totalAmountUsd >= 0
+                                            ? `+$${totalAmountUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                                            : `-$${Math.abs(totalAmountUsd).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+                                        const statusLabel = task.dry_run ? 'Dry Run' : task.status === 'running' ? 'Active Syncing' : task.status;
+                                        const statusColor = task.dry_run ? 'text-orange-500' : task.status === 'running' ? 'text-blue-500' : 'text-gray-400';
+                                        const dotColor = task.dry_run ? 'bg-orange-400' : task.status === 'running' ? 'bg-blue-500' : 'bg-gray-300';
+
+                                        return (
+                                            <div key={task.task_id} className="group transition-all">
+                                                <div
+                                                    onClick={() => {
+                                                        toggleHandler(idx);
+                                                        setSelectedEntity(displayName);
+                                                        if (walletInfo) setSelectedCopyWallet(walletInfo);
+                                                    }}
+                                                    className={`px-8 py-5 flex items-center justify-between cursor-pointer transition-all ${selectedEntity === displayName ? 'bg-gray-100/80' : 'hover:bg-gray-50/50'}`}
+                                                >
+                                                    <div className="flex items-center gap-4">
+                                                        <div className={`w-8 h-8 ${colors[idx % colors.length]} rounded-lg flex items-center justify-center text-white text-[9px] font-black shrink-0 shadow-sm transition-transform group-hover:scale-105`}>
+                                                            {displayName[0]?.toUpperCase() || '?'}
+                                                        </div>
+                                                        <div className="flex flex-col min-w-0">
+                                                            <p className="text-[12px] font-bold text-black truncate">{displayName}</p>
+                                                            <div className="flex items-center gap-1.5">
+                                                                <div className={`w-1.5 h-1.5 rounded-full ${dotColor} animate-pulse`}></div>
+                                                                <p className={`text-[8px] font-bold ${statusColor} uppercase tracking-tight`}>{statusLabel}</p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="text-right">
+                                                            <p className="text-[12px] font-black text-green-600">{fmtProfit}</p>
+                                                            <p className="text-[8px] font-bold text-gray-400 uppercase tracking-tighter">TOTAL PNL</p>
+                                                        </div>
+                                                        {expandedHandlers.has(idx) ?
+                                                            <Icons.ChevronUp className="w-4 h-4 text-gray-400" /> :
+                                                            <Icons.ChevronDown className="w-4 h-4 text-gray-400" />
+                                                        }
                                                     </div>
                                                 </div>
-                                            </div>
-                                            <div className="flex items-center gap-4">
-                                                <div className="text-right">
-                                                    <p className="text-[12px] font-black text-green-600">{handler.totalProfit}</p>
-                                                    <p className="text-[8px] font-bold text-gray-400 uppercase tracking-tighter">TOTAL PNL</p>
-                                                </div>
-                                                {expandedHandlers.has(idx) ?
-                                                    <Icons.ChevronUp className="w-4 h-4 text-gray-400" /> :
-                                                    <Icons.ChevronDown className="w-4 h-4 text-gray-400" />
-                                                }
-                                            </div>
-                                        </div>
 
-                                        {expandedHandlers.has(idx) && (
-                                            <div className="px-8 pb-5 animate-in slide-in-from-top-2 duration-300">
-                                                <div className="pt-4 border-t border-gray-100/50 space-y-2.5">
-                                                    {handler.orders.map((order, oIdx) => (
-                                                        <div key={oIdx} className="p-3 bg-gray-50/80 rounded-xl flex items-center justify-between group/order border border-transparent hover:border-gray-200 transition-all">
-                                                            <div className="min-w-0">
-                                                                <p className="text-[11px] font-bold text-black truncate pr-2">{order.market}</p>
-                                                                <div className="flex items-center gap-1.5 mt-0.5">
-                                                                    <span className="text-[8px] font-black text-gray-400 uppercase">{order.asset}</span>
-                                                                    <span className="w-1 h-1 bg-green-500/50 rounded-full"></span>
-                                                                    <span className="text-[8px] font-bold text-green-600">{order.status}</span>
+                                                {expandedHandlers.has(idx) && (
+                                                    <div className="px-8 pb-5 animate-in slide-in-from-top-2 duration-300">
+                                                        <div className="pt-4 border-t border-gray-100/50 space-y-2.5">
+                                                            <div className="p-3 bg-gray-50/80 rounded-xl border border-transparent">
+                                                                <div className="grid grid-cols-2 gap-2 text-[9px]">
+                                                                    <div><span className="text-gray-400 font-bold">Mode:</span> <span className="font-black text-black">{task.dry_run ? 'Dry Run' : 'Live'}</span></div>
+                                                                    <div><span className="text-gray-400 font-bold">Side:</span> <span className="font-black text-black">{task.side}</span></div>
+                                                                    <div><span className="text-gray-400 font-bold">Ratio:</span> <span className="font-black text-black">{(task.copy_ratio * 100).toFixed(0)}%</span></div>
+                                                                    <div><span className="text-gray-400 font-bold">Max/Trade:</span> <span className="font-black text-black">${task.max_per_trade_usd}</span></div>
+                                                                    {perf && (
+                                                                        <>
+                                                                            <div><span className="text-gray-400 font-bold">Trades:</span> <span className="font-black text-black">{perf.total_trades}</span></div>
+                                                                            <div><span className="text-gray-400 font-bold">Success:</span> <span className="font-black text-green-600">{(perf.success_rate * 100).toFixed(0)}%</span></div>
+                                                                        </>
+                                                                    )}
                                                                 </div>
                                                             </div>
-                                                            <p className="text-[11px] font-black text-green-600 shrink-0">{order.profit}</p>
                                                         </div>
-                                                    ))}
-                                                </div>
+                                                    </div>
+                                                )}
                                             </div>
-                                        )}
-                                    </div>
-                                ))}
+                                        );
+                                    });
+                                })()}
                             </div>
                         </div>
                     </div>
