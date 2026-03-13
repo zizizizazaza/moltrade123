@@ -7,5 +7,7 @@ export const config = {
   /** Login Logo */
   privyLogoUrl: '',
   /** Backend API Base URL */
-  backendApiBaseUrl: 'http://127.0.0.1:8001',
+  // backendApiBaseUrl: 'http://127.0.0.1:8111',
+  backendApiBaseUrl: 'https://nftkashai.online/moltrade-api',
+
 } as const;

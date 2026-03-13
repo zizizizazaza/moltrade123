@@ -77,7 +77,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const PORT = process.env.PORT || 8001;
+const PORT = process.env.PORT || 8113;
 
 const marketService = new MarketService();
 const smartMoneyService = new SmartMoneyService();
